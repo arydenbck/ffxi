@@ -1,12 +1,20 @@
 _addon.name = 'SkillUp'
 _addon.author = 'Aryden'
-_addon.version = '0.0.1.0'
+_addon.version = '0.0.3.0'
 _addon.commands = {'skillup', 'su'}
 
 packets = require('packets')
 res = require 'resources'
 texts = require('texts')
 images = require('images')
+
+-- Generic utilities and FFXI/Windower player-state helpers, extracted
+-- out of this file since they carry no SkillUp-specific logic and could
+-- be reused by any addon. Loaded here (not lazily, unlike
+-- libs/spell_library.lua) since buffactive and other globals from
+-- skillup_helpers.lua are referenced immediately below.
+dofile(windower.addon_path..'libs/utils.lua')
+dofile(windower.addon_path..'libs/skillup_helpers.lua')
 
 -- Player-configurable options (spell whitelists, MP-WS threshold, etc.)
 -- now live per-character at data/<character>/settings.lua, loaded via
@@ -32,88 +40,64 @@ ICON_DIR = 'icons/'  -- asset folder for background.png (used for panel backdrop
 
 -- The 11 skill-up categories, as plain button data.
 CATEGORY_BUTTON_DEFS = {
-    {id='HEL', command='start Healing',    label="Start Healing Magic"},
-    {id='ENH', command='start Enhancing',  label="Start Enhancing Magic"},
-    {id='NIN', command='start Ninjutsu',   label="Start Ninjutsu"},
-    {id='SIN', command='start Singing',    label="Start Singing"},
-    {id='BLU', command='start Blue',       label="Start Blue Magic"},
-    {id='SMN', command='start Summoning',  label="Start Summoning Magic"},
-    {id='GEO', command='start Geomancy',   label="Start Geomancy"},
-    {id='ELE', command='start Elemental',  label="Start Elemental Magic"},
-    {id='DRK', command='start Dark',       label="Start Dark Magic"},
-    {id='DIV', command='start Divine',     label="Start Divine Magic"},
-    {id='ENF', command='start Enfeebling', label="Start Enfeebling Magic"},
+    {id='HEL', category='Healing',    label="Healing Magic"},
+    {id='ENH', category='Enhancing',  label="Enhancing Magic"},
+    {id='NIN', category='Ninjutsu',   label="Ninjutsu"},
+    {id='SIN', category='Singing',    label="Singing"},
+    {id='BLU', category='Blue',       label="Blue Magic"},
+    {id='SMN', category='Summoning',  label="Summoning Magic"},
+    {id='GEO', category='Geomancy',   label="Geomancy"},
+    {id='ELE', category='Elemental',  label="Elemental Magic"},
+    {id='DRK', category='Dark',       label="Dark Magic"},
+    {id='DIV', category='Divine',     label="Divine Magic"},
+    {id='ENF', category='Enfeebling', label="Enfeebling Magic"},
 }
 
 TOGGLE_BUTTON_DEFS = {
+    {id='STARTQ',     label="Start",                     command='startqueue'},
     {id='STOP',       label="Stop Skillups",            command='skillstop'},
     {id='TESTMODE',   label="Test Mode (Ignore Cap)",   command='settestmode'},
 }
 
+-- Function: find_toggle_def
+-- Description: Looks up a toggle-button definition (Start/Stop/Test
+--   Mode) from TOGGLE_BUTTON_DEFS by its short ID.
+-- Parameters:
+--   id (string) - the toggle button's ID, e.g. 'STOP' or 'TESTMODE'
+-- Returns: table or nil - the matching {id, label, command} def, or nil
+--   if no toggle button has that ID
 function find_toggle_def(id)
     for _, def in ipairs(TOGGLE_BUTTON_DEFS) do
         if def.id == id then return def end
     end
 end
 
--- The Main tab's left-column menu: every category plus Stop/Test Mode, as
--- plain button entries. `false` entries are non-interactive divider rows.
+-- Function: main_menu_layout
+-- Description: Builds the Main tab's left-column menu as an ordered
+--   list: every skill-up category checkbox, then a divider, then the
+--   Start/Stop toggle buttons, then another divider, then Test Mode.
+--   `false` entries are non-interactive divider rows.
+-- Parameters: none
+-- Returns: table (L{} list) - ordered list of button/category defs and
+--   `false` divider markers, ready for rendering and click-hit-testing
 function main_menu_layout()
     local layout = L{}
     for _, def in ipairs(CATEGORY_BUTTON_DEFS) do
         layout:append(def)
     end
     layout:append(false)
+    layout:append(find_toggle_def('STARTQ'))
     layout:append(find_toggle_def('STOP'))
     layout:append(false)
     layout:append(find_toggle_def('TESTMODE'))
     return layout
 end
 
-function get_own_mob()
-    local p = windower.ffxi.get_player()
-    return p and windower.ffxi.get_mob_by_index(p.index)
-end
-
-function get_player_status_string()
-    local p = windower.ffxi.get_player()
-    local st = p and res.statuses[p.status]
-    return st and (st.english or st.en) or nil
-end
-
-function get_pet_mob()
-    local me = get_own_mob()
-    if not me or not me.pet_index or me.pet_index == 0 then return nil end
-    return windower.ffxi.get_mob_by_index(me.pet_index)
-end
-function pet_is_valid()
-    local pet_mob = get_pet_mob()
-    return pet_mob ~= nil and pet_mob.valid_target
-end
-
-function get_party_count()
-    local pt = windower.ffxi.get_party()
-    local count = 1
-    if pt then
-        for i = 1, 5 do
-            if pt['p'..i] then count = count + 1 end
-        end
-    end
-    return count
-end
-
-buffactive = {}
-function rebuild_buffactive()
-    buffactive = {}
-    local p = windower.ffxi.get_player()
-    if p and p.buffs then
-        for _, buff_id in ipairs(p.buffs) do
-            local name = res.buffs[buff_id] and res.buffs[buff_id].english
-            buffactive[buff_id] = true
-            if name then buffactive[name] = true end
-        end
-    end
-end
+-- get_own_mob, get_player_status_string, get_pet_mob, pet_is_valid,
+-- rebuild_buffactive, get_current_weather_element, has_item_name, and
+-- trust_already_present all now live in libs/skillup_helpers.lua (loaded
+-- below) -- reusable FFXI/Windower state readers, not SkillUp-specific
+-- logic.
 windower.register_event('gain buff', function(buff_id)
     local name = res.buffs[buff_id] and res.buffs[buff_id].english
     buffactive[buff_id] = true
@@ -125,33 +109,21 @@ windower.register_event('lose buff', function(buff_id)
     if name then buffactive[name] = nil end
 end)
 
-function get_current_weather_element()
-    local info = windower.ffxi.get_info()
-    local w = info and res.weather and res.weather[info.weather]
-    return w and w.element
-end
-
-function has_item_name(name)
-    if not name then return false end
-    local items = windower.ffxi.get_items()
-    if not items or not items.inventory then return false end
-    for _, slot in pairs(items.inventory) do
-        if slot and slot.id and slot.id ~= 0 then
-            local res_item = res.items[slot.id]
-            local item_name = res_item and (res_item[language] or res_item.en or res_item.english)
-            if item_name == name then
-                return true
-            end
-        end
-    end
-    return false
-end
-
+-- Function: get_sets
+-- Description: The addon's main initialization routine, run once when
+--   the 'load' event fires. Loads this character's settings, resets
+--   the skill-up rotation state, initializes every toggle from saved
+--   settings (falling back to sensible defaults for fields that didn't
+--   exist in older settings.lua files), loads the spell library,
+--   centers the settings panel on screen (or restores a saved
+--   position), and builds the settings UI.
+-- Parameters: none
+-- Returns: none
 function get_sets()
     load_user_settings()
     skilluprun = false
-    gs_skill = {skillup_table = {"Healing","Geomancy","Enhancing","Ninjutsu","Singing","Blue","Summoning","Elemental","Dark","Divine","Enfeebling"},skillup_type = 'None',skillup_spells = T{},skillup_target = T{},skillup_party_ok = T{},
-        skillup_count=1,party_cycle_index=0,last_cast_target=nil}
+    rotation_state = {skillup_table = {"Healing","Geomancy","Enhancing","Ninjutsu","Singing","Blue","Summoning","Elemental","Dark","Divine","Enfeebling"},skillup_type = 'None',skillup_spells = T{},skillup_target = T{},skillup_party_ok = T{},
+        skillup_count=1,party_cycle_index=0,last_cast_target=nil,skillup_queue={},queue_index=0}
     local init_use_trust = (user_settings.use_trust ~= nil) and user_settings.use_trust or false
     local init_use_geo = (user_settings.use_geo ~= nil) and user_settings.use_geo or false
     local init_use_item = (user_settings.use_item ~= nil) and user_settings.use_item or false
@@ -162,8 +134,9 @@ function get_sets()
     local init_track_string = (user_settings.track_string_instrument ~= nil) and user_settings.track_string_instrument or (user_settings.track_string_instrument == nil)
     local init_use_toolbags = (user_settings.use_toolbags ~= nil) and user_settings.use_toolbags or false
     local init_periodic_ui_refresh = (user_settings.periodic_ui_refresh ~= nil) and user_settings.periodic_ui_refresh or false
-    gs_skillup = {color={GEO=true,HEL=true,ENH=true,NIN=true,SIN=true,BLU=true,SMN=true,STOP=true,ELE=true,DRK=true,DIV=true,ENF=true,TESTMODE=true},
-                skill_ups={},total_skill_ups=0,skill={},use_trust=init_use_trust,use_item=init_use_item,use_geo=init_use_geo,use_mp_ws=init_use_mp_ws,use_offensive=init_use_offensive,require_engaged=init_require_engaged,track_wind_instrument=init_track_wind,track_string_instrument=init_track_string,use_toolbags=init_use_toolbags,periodic_ui_refresh=init_periodic_ui_refresh,test_mode=false,skipped_spells=T{},debug_action_msg=false,debug_action_capture=false,skill_ph_cache=0,skill_ph_last_update=0,last_missing_msg_time=0,resting_recovery_sent=false}
+    addon_state = {color={GEO=true,HEL=true,ENH=true,NIN=true,SIN=true,BLU=true,SMN=true,STOP=true,ELE=true,DRK=true,DIV=true,ENF=true,TESTMODE=true,STARTQ=true},
+                queue_selected={},
+                skill_ups={},total_skill_ups=0,skill={},use_trust=init_use_trust,use_item=init_use_item,use_geo=init_use_geo,use_mp_ws=init_use_mp_ws,use_offensive=init_use_offensive,require_engaged=init_require_engaged,track_wind_instrument=init_track_wind,track_string_instrument=init_track_string,use_toolbags=init_use_toolbags,periodic_ui_refresh=init_periodic_ui_refresh,test_mode=false,skipped_spells=T{},debug_action_msg=false,debug_action_capture=false,skill_ph_cache=0,skill_ph_last_update=0,last_missing_msg_time=0,resting_recovery_sent=false,last_trust_summon_time=nil}
 
     ensure_spell_library_loaded()
     init_settings_selection()
@@ -179,6 +152,12 @@ function get_sets()
 
     create_settings_ui()
 end
+-- Function: file_unload
+-- Description: Cleanup run when the addon is unloaded. Saves the panel
+--   position to disk if that option is enabled, and destroys every
+--   settings UI object.
+-- Parameters: none
+-- Returns: none
 function file_unload()
     if user_settings.save_settings then
         file_write()
@@ -208,6 +187,17 @@ pending_cast = {
     saw_start = false,  -- category-8 'starts casting' seen for this cast (spells only, confirmed empirically)
 }
 
+-- Function: begin_pending_cast
+-- Description: Records that an action was just sent to the server, so
+--   the 'action' event handler can later match the server's response
+--   back to what this addon actually did (as opposed to a manual cast
+--   the player made themselves, which this addon never tracks).
+-- Parameters:
+--   cast_type (string) - one of 'spell', 'ja', 'ws', or 'item'
+--   name (string) - the localized name of the spell/ability/item sent
+--   target (string) - the target string sent with the action, e.g.
+--     '<me>', '<t>', or '<p2>'
+-- Returns: none (mutates the global pending_cast table)
 function begin_pending_cast(cast_type, name, target)
     pending_cast.active = true
     pending_cast.cast_type = cast_type
@@ -217,6 +207,12 @@ function begin_pending_cast(cast_type, name, target)
     pending_cast.saw_start = false
 end
 
+-- Function: clear_pending_cast
+-- Description: Resets pending_cast back to its empty/inactive state,
+--   once its outcome (success, interruption, or timeout) has been
+--   handled.
+-- Parameters: none
+-- Returns: none (mutates the global pending_cast table)
 function clear_pending_cast()
     pending_cast.active = false
     pending_cast.cast_type = nil
@@ -226,8 +222,15 @@ function clear_pending_cast()
     pending_cast.saw_start = false
 end
 
--- Dumps a Windower 'action' event table to skillup_debug.log in enough
--- detail to read off the real category and message IDs this server uses.
+-- Function: dump_action_event
+-- Description: Debug helper that logs the full contents of a Windower
+--   'action' event (actor, category, targets, and each target's
+--   individual action messages/params) to skillup_debug.log, in enough
+--   detail to read off the real category and message IDs this
+--   particular server uses for cast success/interruption.
+-- Parameters:
+--   act (table) - the raw 'action' event table Windower passed in
+-- Returns: none (writes to the debug log file)
 function dump_action_event(act)
     log_debug_line('=== action event ===')
     log_debug_line('actor_id='..tostring(act.actor_id)..' category='..tostring(act.category)..' param='..tostring(act.param))
@@ -241,6 +244,18 @@ function dump_action_event(act)
     end
 end
 
+-- Function: handle_cast_success
+-- Description: Called when the 'action' event confirms a tracked spell
+--   resolved successfully (category 4 following category 8). Handles
+--   several special cases (pet-capped-skill upkeep, category fully
+--   capped, Summoning Pact follow-up, Avatar's Favor/Elemental Siphon
+--   follow-up) before falling through to the normal case: advance the
+--   rotation to the next spell and re-run the full decision pipeline.
+--   Advancing here (rather than just recasting the same spell) is what
+--   actually moves the rotation forward -- without it, the same spell
+--   would repeat forever.
+-- Parameters: none (reads/clears the global pending_cast state)
+-- Returns: none
 function handle_cast_success()
     local was_name = pending_cast.name
     local was_type = pending_cast.cast_type
@@ -278,6 +293,16 @@ function handle_cast_success()
     decide_and_act(3.0)
 end
 
+-- Function: handle_cast_interrupted
+-- Description: Called when the 'action' event shows a tracked spell was
+--   interrupted (two consecutive category-8 events). Checks the skill
+--   cap first, then decides whether to skip the current spell (target
+--   died or is no longer valid) or re-run the full decision pipeline
+--   for a fresh attempt -- re-running the pipeline (rather than blindly
+--   retrying the exact same spell) is what lets an interrupted-for-
+--   insufficient-MP cast trigger the auto-heal fallback on retry.
+-- Parameters: none (reads/clears the global pending_cast state)
+-- Returns: none
 function handle_cast_interrupted()
     local was_name = pending_cast.name
     clear_pending_cast()
@@ -294,7 +319,7 @@ function handle_cast_interrupted()
         -- toggle turned off mid-run) -- don't retry it, advance instead.
         advance_and_cast_skillup_spell(3.0)
         return
-    elseif party_index_of_target(gs_skill.last_cast_target) and not is_party_member_targetable(party_index_of_target(gs_skill.last_cast_target)) then
+    elseif party_index_of_target(rotation_state.last_cast_target) and not is_party_member_targetable(party_index_of_target(rotation_state.last_cast_target)) then
         advance_and_cast_skillup_spell(3.0)
         return
     else
@@ -313,11 +338,24 @@ end
 windower.register_event('action', function(act)
     local me = windower.ffxi.get_player()
     if not me or act.actor_id ~= me.id then return end
-    if gs_skillup.debug_action_capture then
+    if addon_state.debug_action_capture then
         windower.add_to_chat(167, 'actioncapture: action event fired, category='..tostring(act.category)..' -- logging to Saves/skillup_debug.log')
         dump_action_event(act)
     end
     if not pending_cast.active or not skilluprun then return end
+    if pending_cast.cast_type == 'ws' then
+        -- Confirmed via actioncapture: category=3 with message=225 is
+        -- the weapon skill's actual damage resolution. Without this,
+        -- a pending 'ws' cast was only ever cleared by the 8-second
+        -- safety-net timeout in prerender, even when the weapon skill
+        -- itself resolved in a couple of seconds -- blocking the whole
+        -- decision loop for the rest of that timeout on every single
+        -- MP Regain WS use.
+        if act.category == 3 then
+            handle_cast_success()
+        end
+        return
+    end
     if pending_cast.cast_type ~= 'spell' then
         return
     end
@@ -334,42 +372,79 @@ windower.register_event('action', function(act)
     end
 end)
 
+-- Function: spell_allowed_by_user_list
+-- Description: Checks whether a spell resource table passes the
+--   relevant user whitelist. Enemy-targeted (offensive) spells check
+--   against user_settings.user_spells.Offensive, which applies across
+--   every category and is opt-in (an empty list allows nothing, even
+--   with the offensive-spells toggle on). Self/party-targeted spells
+--   check against the current category's own whitelist, where an empty
+--   list means "allow anything" instead.
+-- Parameters:
+--   v (table) - a res.spells entry (or equivalent) with .targets and
+--     .name fields
+-- Returns: boolean - true if this spell passes the relevant whitelist
 function spell_allowed_by_user_list(v)
     local is_offensive = not v.targets:contains('Self')
     if is_offensive then
         return #user_settings.user_spells.Offensive > 0 and user_settings.user_spells.Offensive:contains(v.name)
     end
-    local list = user_settings.user_spells[gs_skill.skillup_type]
+    local list = user_settings.user_spells[rotation_state.skillup_type]
     return #list == 0 or list:contains(v.name)
 end
+
+-- Function: register_skillup_spell
+-- Description: Adds a spell to the active rotation (rotation_state.skillup_spells)
+--   and records its default target string and whether it can be cast on
+--   party members, based on the spell's own targets field.
+-- Parameters:
+--   v (table) - a res.spells entry with .targets and a localized name
+--     field (v[language])
+-- Returns: none (mutates rotation_state.skillup_spells/skillup_target/
+--   skillup_party_ok)
 function register_skillup_spell(v)
     local name = v[language]
-    gs_skill.skillup_spells:append(name)
-    gs_skill.skillup_target[name] = v.targets:contains('Self') and '<me>' or '<t>'
-    gs_skill.skillup_party_ok[name] = v.targets:contains('Party')
+    rotation_state.skillup_spells:append(name)
+    rotation_state.skillup_target[name] = v.targets:contains('Self') and '<me>' or '<t>'
+    rotation_state.skillup_party_ok[name] = v.targets:contains('Party')
 end
+-- Function: self_command
+-- Description: The addon's central command dispatcher, called for
+--   every //skillup/su command. Splits multi-word commands (e.g.
+--   "start Healing", "setthreshold 50") into a table when needed, then
+--   handles category starting/queue building, every toggle (Trust,
+--   Geo, Item, MP Regain WS, Offensive, Engaged, instrument tracking,
+--   toolbags, test mode, periodic UI refresh, show/hide), and every
+--   debug command (mpwsdebug, partydebug, skilldebug, actionmsgdebug,
+--   actioncapture). Finishes by marking settings as unsaved if the
+--   command changed something save_settings_file() persists, then
+--   refreshes the display.
+-- Parameters:
+--   command (string) - the raw command string, e.g. "start Healing",
+--     "skillstop", or "setthreshold 50"
+-- Returns: none
 function self_command(command)
     local commandArgs = command
     if #commandArgs:split(' ') >= 2 then
         commandArgs = T(commandArgs:split(' '))
     end
     if type(commandArgs) == 'table' and commandArgs[1] == 'start' then
-        for i,v in ipairs(gs_skill.skillup_table) do
+        for i,v in ipairs(rotation_state.skillup_table) do
             if v:lower() == commandArgs[2]:lower() then
-                gs_skill.skillup_type = v
+                rotation_state.skillup_type = v
                 skilluprun = true
-                if #gs_skill.skillup_spells > 0 then
-                    gs_skill.skillup_spells:clear()
+                if #rotation_state.skillup_spells > 0 then
+                    rotation_state.skillup_spells:clear()
                 end
-                gs_skill.skillup_target = T{}
-                gs_skill.skillup_party_ok = T{}
-                gs_skill.party_cycle_index = 0
-                gs_skill.skillup_count = 1
+                rotation_state.skillup_target = T{}
+                rotation_state.skillup_party_ok = T{}
+                rotation_state.party_cycle_index = 0
+                rotation_state.skillup_count = 1
                 local skill_id = {["Divine"]=32,["Healing"]=33,["Enhancing"]=34,["Enfeebling"]=35,["Elemental"]=36,["Dark"]=37,["Summoning"]=38,["Ninjutsu"]=39,["Singing"]=40,["Blue"]=43,["Geomancy"]=44}
                 local spells_have = windower.ffxi.get_spells()
                 local missing_spells = T{}
                 for i,v in pairs(res.spells) do
-                    if v.skill == skill_id[gs_skill.skillup_type] and spell_valid(v) and spell_allowed_by_user_list(v) then
+                    if v.skill == skill_id[rotation_state.skillup_type] and spell_valid(v) and spell_allowed_by_user_list(v) then
                         if spells_have[v.id] then
                             register_skillup_spell(v)
                         else
@@ -377,20 +452,20 @@ function self_command(command)
                         end
                     end
                 end
-                if not (#gs_skill.skillup_spells > 0) then
-                    if os.clock() - (gs_skillup.last_missing_msg_time or 0) > 2 then
-                        gs_skillup.last_missing_msg_time = os.clock()
+                if not (#rotation_state.skillup_spells > 0) then
+                    if os.clock() - (addon_state.last_missing_msg_time or 0) > 2 then
+                        addon_state.last_missing_msg_time = os.clock()
                         if #missing_spells > 0 then
-                            windower.add_to_chat(123, "You do not have the following "..gs_skill.skillup_type.." spell(s): "..missing_spells:concat(', '))
+                            windower.add_to_chat(123, "You do not have the following "..rotation_state.skillup_type.." spell(s): "..missing_spells:concat(', '))
                         end
-                        if #user_settings.user_spells[gs_skill.skillup_type] == 0 then
-                            windower.add_to_chat(123, "Note: your "..gs_skill.skillup_type.." whitelist (user_spells."..gs_skill.skillup_type..") is empty.")
+                        if #user_settings.user_spells[rotation_state.skillup_type] == 0 then
+                            windower.add_to_chat(123, "Note: your "..rotation_state.skillup_type.." whitelist (user_spells."..rotation_state.skillup_type..") is empty.")
                         end
                         if #user_settings.user_spells.Offensive == 0 then
                             windower.add_to_chat(123, "Note: your Offensive spell whitelist (user_spells.Offensive) is empty -- required for any category that relies on enemy-targeted spells.")
                         end
                         if #missing_spells == 0 then
-                            windower.add_to_chat(123,"Current Job Can Not Use Spells From "..gs_skill.skillup_type)
+                            windower.add_to_chat(123,"Current Job Can Not Use Spells From "..rotation_state.skillup_type)
                         end
                     end
                     skilluprun = false
@@ -410,35 +485,37 @@ function self_command(command)
     if command == "skillstop" then
         skilluprun = false
     elseif command == 'settrust' then
-        gs_skillup.use_trust = not gs_skillup.use_trust
+        addon_state.use_trust = not addon_state.use_trust
     elseif command == 'setitem' then
-        gs_skillup.use_item = not gs_skillup.use_item
+        addon_state.use_item = not addon_state.use_item
     elseif command == 'setgeo' then
-        gs_skillup.use_geo = not gs_skillup.use_geo
+        addon_state.use_geo = not addon_state.use_geo
     elseif command == 'setmpws' then
-        gs_skillup.use_mp_ws = not gs_skillup.use_mp_ws
+        addon_state.use_mp_ws = not addon_state.use_mp_ws
     elseif command == 'setoffensive' then
-        gs_skillup.use_offensive = not gs_skillup.use_offensive
+        addon_state.use_offensive = not addon_state.use_offensive
     elseif command == 'setengaged' then
-        gs_skillup.require_engaged = not gs_skillup.require_engaged
+        addon_state.require_engaged = not addon_state.require_engaged
     elseif command == 'settrackwind' then
-        gs_skillup.track_wind_instrument = not gs_skillup.track_wind_instrument
+        addon_state.track_wind_instrument = not addon_state.track_wind_instrument
     elseif command == 'settrackstring' then
-        gs_skillup.track_string_instrument = not gs_skillup.track_string_instrument
+        addon_state.track_string_instrument = not addon_state.track_string_instrument
     elseif command == 'settoolbags' then
-        gs_skillup.use_toolbags = not gs_skillup.use_toolbags
+        addon_state.use_toolbags = not addon_state.use_toolbags
     elseif command == 'settestmode' then
-        gs_skillup.test_mode = not gs_skillup.test_mode
-        windower.add_to_chat(123, 'Test mode (ignore skill cap): '..tostring(gs_skillup.test_mode))
+        addon_state.test_mode = not addon_state.test_mode
+        windower.add_to_chat(123, 'Test mode (ignore skill cap): '..tostring(addon_state.test_mode))
         -- If skillup already auto-stopped from hitting the cap, turning
         -- test mode on wouldn't otherwise do anything visible until the
         -- category was manually restarted -- resume it automatically.
-        if gs_skillup.test_mode and not skilluprun and gs_skill.skillup_type ~= 'None' then
-            self_command('start '..gs_skill.skillup_type)
+        if addon_state.test_mode and not skilluprun and rotation_state.skillup_type ~= 'None' then
+            self_command('start '..rotation_state.skillup_type)
         end
+    elseif command == 'startqueue' then
+        start_or_resume_queue()
     elseif command == 'zfix' then
-        gs_skillup.periodic_ui_refresh = not gs_skillup.periodic_ui_refresh
-        if gs_skillup.periodic_ui_refresh then
+        addon_state.periodic_ui_refresh = not addon_state.periodic_ui_refresh
+        if addon_state.periodic_ui_refresh then
             windower.add_to_chat(123, 'Periodic UI refresh ON -- the panel will rebuild itself every '..UI_REFRESH_INTERVAL..'s to reclaim top render priority if another addon draws over it (Windower has no real z-index control). This causes a brief visible flash each time.')
             last_ui_refresh_time = os.clock()
         else
@@ -449,7 +526,7 @@ function self_command(command)
     elseif command == 'hide' then
         hide_settings_panel()
     elseif command == 'mpwsdebug' then
-        windower.add_to_chat(123, 'use_mp_ws: '..tostring(gs_skillup.use_mp_ws))
+        windower.add_to_chat(123, 'use_mp_ws: '..tostring(addon_state.use_mp_ws))
         windower.add_to_chat(123, 'windower.ffxi.get_player().vitals.mpp: '..tostring(windower.ffxi.get_player().vitals.mpp)..' (threshold='..tostring(user_settings.mp_ws_threshold)..')')
         windower.add_to_chat(123, 'has_valid_enemy_target: '..tostring(has_valid_enemy_target())..' (status='..tostring(get_player_status_string())..')')
         windower.add_to_chat(123, 'windower.ffxi.get_player().vitals.tp: '..tostring(windower.ffxi.get_player().vitals.tp)..' (need >= 1000)')
@@ -458,6 +535,21 @@ function self_command(command)
             windower.add_to_chat(123, 'weapon_skill_available('..name..'): '..tostring(weapon_skill_available(name)))
         end
         windower.add_to_chat(123, 'get_ready_mp_ws(): '..tostring(get_ready_mp_ws()))
+    elseif command == 'trustdebug' then
+        local usable = spell_usable(res.spells[931])
+        local known = windower.ffxi.get_spells()[931]
+        local recast = windower.ffxi.get_spell_recasts()[res.spells[931].recast_id]
+        local present = trust_already_present("Moogle")
+        local status = get_player_status_string()
+        local upcoming = rotation_state.skillup_spells[rotation_state.skillup_count]
+        local grace_elapsed = addon_state.last_trust_summon_time and (os.clock() - addon_state.last_trust_summon_time) or nil
+        windower.add_to_chat(123, 'use_trust: '..tostring(addon_state.use_trust))
+        windower.add_to_chat(123, 'spell_usable(Moogle): '..tostring(usable)..' (known='..tostring(known)..', recast='..tostring(recast)..')')
+        windower.add_to_chat(123, 'upcoming: '..tostring(upcoming)..' (skips Trust check if =="Moogle")')
+        windower.add_to_chat(123, 'trust_already_present("Moogle"): '..tostring(present))
+        windower.add_to_chat(123, 'player status: '..tostring(status)..' (skips Trust check if =="Engaged")')
+        windower.add_to_chat(123, 'last_trust_summon_time: '..tostring(addon_state.last_trust_summon_time)..' (elapsed='..tostring(grace_elapsed)..', grace window is 5s)')
+        windower.add_to_chat(123, 'would summon now: '..tostring(addon_state.use_trust and usable and upcoming ~= "Moogle" and not present and status ~= 'Engaged' and (not grace_elapsed or grace_elapsed > 5)))
     elseif command == 'partydebug' then
         log_debug_line('=== partydebug ===')
         local pt = windower.ffxi.get_party()
@@ -475,17 +567,17 @@ function self_command(command)
         end
         local live = get_live_party_targets()
         log_debug_line('get_live_party_targets(): '..tostring(#live)..' found: '..table.concat(live, ', '))
-        log_debug_line('party_cycle_index: '..tostring(gs_skill.party_cycle_index))
-        local cur_name = gs_skill.skillup_spells[gs_skill.skillup_count]
-        log_debug_line('current spell: '..tostring(cur_name)..' | party_ok='..tostring(gs_skill.skillup_party_ok[cur_name])..' | base_target='..tostring(gs_skill.skillup_target[cur_name]))
+        log_debug_line('party_cycle_index: '..tostring(rotation_state.party_cycle_index))
+        local cur_name = rotation_state.skillup_spells[rotation_state.skillup_count]
+        log_debug_line('current spell: '..tostring(cur_name)..' | party_ok='..tostring(rotation_state.skillup_party_ok[cur_name])..' | base_target='..tostring(rotation_state.skillup_target[cur_name]))
         log_debug_line('skillup_cast_target(current): '..tostring(skillup_cast_target(cur_name)))
         windower.add_to_chat(123, 'Party debug logged to Saves/skillup_debug.log')
     elseif command == 'skilldebug' then
         log_debug_line('=== skilldebug ===')
-        log_debug_line('gs_skillup.skill is nil: '..tostring(gs_skillup.skill == nil))
-        if gs_skillup.skill then
+        log_debug_line('addon_state.skill is nil: '..tostring(addon_state.skill == nil))
+        if addon_state.skill then
             local keys = {}
-            for k, v in pairs(gs_skillup.skill) do
+            for k, v in pairs(addon_state.skill) do
                 table.insert(keys, tostring(k)..' = '..tostring(v))
             end
             table.sort(keys)
@@ -493,30 +585,44 @@ function self_command(command)
                 log_debug_line(line)
             end
         end
-        log_debug_line('current category: '..tostring(gs_skill.skillup_type))
-        local expected_key = tostring(gs_skill.skillup_type)..' Magic Level'
-        log_debug_line('key this addon looks up: "'..expected_key..'" -> '..tostring(gs_skillup.skill and gs_skillup.skill[expected_key]))
+        log_debug_line('current category: '..tostring(rotation_state.skillup_type))
+        local expected_key = tostring(rotation_state.skillup_type)..' Magic Level'
+        log_debug_line('key this addon looks up: "'..expected_key..'" -> '..tostring(addon_state.skill and addon_state.skill[expected_key]))
         windower.add_to_chat(123, 'Skill packet dumped to Saves/skillup_debug.log -- compare the field list there against what this addon looks up.')
     elseif command == 'actionmsgdebug' then
-        gs_skillup.debug_action_msg = not gs_skillup.debug_action_msg
-        windower.add_to_chat(123, 'Action message debug: '..tostring(gs_skillup.debug_action_msg)..'. Logging to Saves/skillup_debug.log -- skill up a spell now, then check that file.')
+        addon_state.debug_action_msg = not addon_state.debug_action_msg
+        windower.add_to_chat(123, 'Action message debug: '..tostring(addon_state.debug_action_msg)..'. Logging to Saves/skillup_debug.log -- skill up a spell now, then check that file.')
     elseif command == 'actioncapture' then
-        gs_skillup.debug_action_capture = not gs_skillup.debug_action_capture
-        windower.add_to_chat(123, 'Action event capture: '..tostring(gs_skillup.debug_action_capture)..'. Logging to Saves/skillup_debug.log -- start a skill-up category, let it cast once (or interrupt one, e.g. by moving), then check that file.')
+        addon_state.debug_action_capture = not addon_state.debug_action_capture
+        windower.add_to_chat(123, 'Action event capture: '..tostring(addon_state.debug_action_capture)..'. Logging to Saves/skillup_debug.log -- start a skill-up category, let it cast once (or interrupt one, e.g. by moving), then check that file.')
+    end
+    local base_command = (type(commandArgs) == 'table' and commandArgs[1]) or command
+    if SETTINGS_DIRTYING_COMMANDS:contains(base_command) then
+        settings_state.unsaved_changes = true
+        refresh_unsaved_indicator()
     end
     updatedisplay()
 end
+-- Function: spell_usable
+-- Description: Checks whether a spell is currently castable: known
+--   (the player actually has it) and off recast.
+-- Parameters:
+--   spell (table) - a res.spells entry with .id and .recast_id
+-- Returns: boolean or nil - true if usable, nil/falsy otherwise
 function spell_usable(spell)
     if windower.ffxi.get_spells()[spell.id] and windower.ffxi.get_spell_recasts()[spell.recast_id] == 0 then
         return true
     end
 end
-function has_rdm_sub()
-    return windower.ffxi.get_player().sub_job == 'RDM' and windower.ffxi.get_player().sub_job_level >= 41
-end
-function has_haste_sub()
-    return windower.ffxi.get_player().sub_job == 'RDM' or windower.ffxi.get_player().sub_job == 'WHM'
-end
+-- has_rdm_sub, has_haste_sub now live in libs/skillup_helpers.lua
+
+-- Function: get_spell_by_name
+-- Description: Looks up a spell's full resource table by its English
+--   name, scanning res.spells.
+-- Parameters:
+--   name (string) - the spell's English name, e.g. "Cure II"
+-- Returns: table or nil - the matching res.spells entry, or nil if no
+--   spell has that name
 function get_spell_by_name(name)
     for id,v in pairs(res.spells) do
         if v.en == name then
@@ -524,6 +630,13 @@ function get_spell_by_name(name)
         end
     end
 end
+
+-- Function: get_skill_id_by_name
+-- Description: Looks up a combat/magic skill's numeric resource ID by
+--   its English name, scanning res.skills.
+-- Parameters:
+--   name (string) - the skill's English name, e.g. "Dagger"
+-- Returns: number or nil - the matching skill ID, or nil if not found
 function get_skill_id_by_name(name)
     for id,v in pairs(res.skills) do
         if v.en == name then
@@ -531,7 +644,13 @@ function get_skill_id_by_name(name)
         end
     end
 end
--- The combat skill (Dagger, Club, Staff, etc.) of whatever is in the main slot.
+
+-- Function: main_weapon_skill_type
+-- Description: Gets the combat skill (Dagger, Club, Staff, etc.) of
+--   whatever weapon is currently equipped in the main hand.
+-- Parameters: none
+-- Returns: number or nil - the equipped main weapon's skill ID, or nil
+--   if nothing is equipped or item data isn't available
 function main_weapon_skill_type()
     local equipment = windower.ffxi.get_items().equipment
     local main_index = equipment.main
@@ -541,6 +660,14 @@ function main_weapon_skill_type()
     local item_res = res.items[item.id]
     return item_res and item_res.skill
 end
+
+-- Function: weapon_skill_available
+-- Description: Checks whether a named weapon skill is currently usable
+--   with the equipped weapon (correct weapon type, sufficient combat
+--   skill/level, job has it unlocked).
+-- Parameters:
+--   name (string) - the weapon skill's English name, e.g. "Energy Drain"
+-- Returns: boolean - true if that weapon skill is currently available
 function weapon_skill_available(name)
     local ws_list = windower.ffxi.get_abilities().weapon_skills
     if not ws_list then return false end
@@ -555,14 +682,32 @@ function weapon_skill_available(name)
     end
     return false
 end
+
+-- Function: use_weapon_skill
+-- Description: Fires a weapon skill at a target, provided there's
+--   enough TP (1000+). Tracks it as a pending 'ws' cast so its outcome
+--   can be matched back by the 'action' event handler.
+-- Parameters:
+--   name (string) - the weapon skill's English name to use
+--   target (string or nil) - the target string, e.g. '<t>'; defaults to
+--     '<t>' if not given
+-- Returns: none
 function use_weapon_skill(name, target)
     if windower.ffxi.get_player().vitals.tp < 1000 then
         return
     end
-    gs_skill.skillup_target[name] = target or '<t>'
+    rotation_state.skillup_target[name] = target or '<t>'
     begin_pending_cast('ws', name, target or '<t>')
     windower.send_command(action_prefix()..' /ws "'..name..'" '..(target or '<t>'))
 end
+
+-- Function: mp_regain_ws_candidates
+-- Description: Lists the MP-restoring weapon skills available for
+--   whatever weapon type is currently equipped, in priority order
+--   (e.g. Dagger prefers Energy Drain, falling back to Energy Steal).
+-- Parameters: none
+-- Returns: table - an ordered list of weapon skill English names to try,
+--   or an empty table if the equipped weapon type has none
 function mp_regain_ws_candidates()
     local skill_type = main_weapon_skill_type()
     if skill_type == get_skill_id_by_name('Dagger') then
@@ -574,8 +719,19 @@ function mp_regain_ws_candidates()
     end
     return {}
 end
+
+-- Function: get_ready_mp_ws
+-- Description: Decides whether an MP-regain weapon skill should fire
+--   right now: the "Use MP Regain WS" toggle must be on, current MP%
+--   must be at or below the configured threshold, there must be a
+--   valid engaged enemy target, TP must be at least 1000, and at least
+--   one candidate weapon skill for the equipped weapon must actually be
+--   available.
+-- Parameters: none
+-- Returns: string or nil - the English name of the weapon skill to use,
+--   or nil if none of the conditions are met
 function get_ready_mp_ws()
-    if not gs_skillup.use_mp_ws then return nil end
+    if not addon_state.use_mp_ws then return nil end
     if windower.ffxi.get_player().vitals.mpp > user_settings.mp_ws_threshold then return nil end
     if not has_valid_enemy_target() then return nil end
     if windower.ffxi.get_player().vitals.tp < 1000 then return nil end
@@ -586,57 +742,157 @@ function get_ready_mp_ws()
     end
     return nil
 end
--- The skill packet marks "Capped=true" even for skills sitting at
--- Level=0 (untouched/inactive for the current job setup) -- confirmed
--- via live packet dump (Blue Magic, Geomancy, Singing, Handbell, and
--- both instrument skills all showed Capped=true at Level=0). A level-0
--- skill can't be genuinely capped, so trusting Capped alone made
--- check_skill_cap() stop a freshly-started category immediately, before
--- ever attempting a single cast.
+
+-- Function: skill_is_genuinely_capped
+-- Description: Checks whether a skill is genuinely capped, correcting
+--   for a server quirk where the skill packet marks Capped=true even
+--   for skills sitting at Level=0 (untouched/inactive for the current
+--   job setup) -- confirmed via a live packet dump where Blue Magic,
+--   Geomancy, Singing, Handbell, and both instrument skills all showed
+--   Capped=true at Level=0. Trusting Capped alone previously made
+--   check_skill_cap() stop a freshly-started category immediately,
+--   before ever attempting a single cast.
+-- Parameters:
+--   skill_name (string) - the skill's name as it appears in the skill
+--     packet, e.g. "Healing Magic" or "Ninjutsu"
+-- Returns: boolean - true only if Capped is true AND Level is above 0
 function skill_is_genuinely_capped(skill_name)
-    local capped = gs_skillup.skill[skill_name..' Capped']
-    local level = gs_skillup.skill[skill_name..' Level'] or 0
+    local capped = addon_state.skill[skill_name..' Capped']
+    local level = addon_state.skill[skill_name..' Level'] or 0
     return capped and level > 0
 end
 
+-- Function: build_queue_from_checkboxes
+-- Description: Builds the list of categories currently checked on the
+--   Main tab, in CATEGORY_BUTTON_DEFS order (a fixed, predictable order
+--   regardless of the order boxes were actually clicked).
+-- Parameters: none
+-- Returns: table - an ordered list of category name strings, e.g.
+--   {"Healing", "Enhancing"}
+function build_queue_from_checkboxes()
+    local queue = {}
+    for _, def in ipairs(CATEGORY_BUTTON_DEFS) do
+        if addon_state.queue_selected[def.category] then
+            table.insert(queue, def.category)
+        end
+    end
+    return queue
+end
+
+-- queues_equal now lives in libs/utils.lua
+
+-- Function: start_or_resume_queue
+-- Description: The Start button's logic. If there's a paused queue
+--   (stopped mid-way, not exhausted) and the currently checked boxes
+--   still match it exactly, resumes it from where it left off.
+--   Otherwise builds a fresh queue from whatever's currently checked
+--   and starts the first category in it.
+-- Parameters: none
+-- Returns: none
+function start_or_resume_queue()
+    local checked_queue = build_queue_from_checkboxes()
+    -- Only resume the existing paused queue if the checkboxes still match
+    -- it exactly -- otherwise (e.g. you checked something new after
+    -- stopping) this would keep silently ignoring the change and just
+    -- replaying the old queue forever.
+    local mid_queue = (not skilluprun) and rotation_state.skillup_queue and #rotation_state.skillup_queue > 0
+        and rotation_state.queue_index > 0 and rotation_state.queue_index <= #rotation_state.skillup_queue
+        and queues_equal(checked_queue, rotation_state.skillup_queue)
+    if mid_queue then
+        self_command('start '..rotation_state.skillup_queue[rotation_state.queue_index])
+        return
+    end
+    if #checked_queue == 0 then
+        windower.add_to_chat(123, 'No categories checked -- check at least one before starting.')
+        return
+    end
+    rotation_state.skillup_queue = checked_queue
+    rotation_state.queue_index = 1
+    self_command('start '..checked_queue[1])
+end
+
+-- Function: check_skill_cap
+-- Description: Checks whether the active category is genuinely capped
+--   (see skill_is_genuinely_capped), and if so, either chains to the
+--   next category in the queue (rebuilding its spell list and
+--   continuing, reporting "not capped" to the caller) or reports
+--   genuinely capped and stops the rotation if the queue is exhausted.
+--   Test Mode bypasses every branch, so a capped skill never stops the
+--   rotation while it's on.
+-- Parameters: none
+-- Returns: boolean - true if the whole queue (not just this category)
+--   is now capped and skillup has stopped; false otherwise (including
+--   when it just silently chained to the next queued category)
 function check_skill_cap()
-    if S{'Healing','Enhancing','Blue','Summoning','Elemental','Dark','Divine','Enfeebling'}:contains(gs_skill.skillup_type) then
-        if skill_is_genuinely_capped(gs_skill.skillup_type..' Magic') and not gs_skillup.test_mode then
-            skilluprun = false
-            return true
-        end
-    elseif gs_skill.skillup_type == "Ninjutsu" then
-        if skill_is_genuinely_capped(gs_skill.skillup_type) and not gs_skillup.test_mode then
-            skilluprun = false
-            return true
-        end
-    elseif gs_skill.skillup_type == "Geomancy" then
-        if skill_is_genuinely_capped('Geomancy') and skill_is_genuinely_capped('Handbell') and not gs_skillup.test_mode then
-            skilluprun = false
-            return true
-        end
-    elseif gs_skill.skillup_type == "Singing" then
-        local wind_ok = not gs_skillup.track_wind_instrument or skill_is_genuinely_capped('Wind Instrument')
-        local string_ok = not gs_skillup.track_string_instrument or skill_is_genuinely_capped('Stringed Instrument')
-        if skill_is_genuinely_capped('Singing') and wind_ok and string_ok and not gs_skillup.test_mode then
-            skilluprun = false
-            return true
-        end
+    local capped = false
+    if S{'Healing','Enhancing','Blue','Summoning','Elemental','Dark','Divine','Enfeebling'}:contains(rotation_state.skillup_type) then
+        capped = skill_is_genuinely_capped(rotation_state.skillup_type..' Magic') and not addon_state.test_mode
+    elseif rotation_state.skillup_type == "Ninjutsu" then
+        capped = skill_is_genuinely_capped(rotation_state.skillup_type) and not addon_state.test_mode
+    elseif rotation_state.skillup_type == "Geomancy" then
+        capped = skill_is_genuinely_capped('Geomancy') and skill_is_genuinely_capped('Handbell') and not addon_state.test_mode
+    elseif rotation_state.skillup_type == "Singing" then
+        local wind_ok = not addon_state.track_wind_instrument or skill_is_genuinely_capped('Wind Instrument')
+        local string_ok = not addon_state.track_string_instrument or skill_is_genuinely_capped('Stringed Instrument')
+        capped = skill_is_genuinely_capped('Singing') and wind_ok and string_ok and not addon_state.test_mode
     else
         return false
     end
+
+    if not capped then
+        return false
+    end
+
+    -- Capped -- chain to the next queued category instead of stopping,
+    -- if there is one.
+    if rotation_state.skillup_queue and rotation_state.queue_index < #rotation_state.skillup_queue then
+        rotation_state.queue_index = rotation_state.queue_index + 1
+        local next_category = rotation_state.skillup_queue[rotation_state.queue_index]
+        windower.add_to_chat(123, rotation_state.skillup_type..' capped -- moving on to '..next_category..'.')
+        self_command('start '..next_category)
+        return false
+    end
+
+    skilluprun = false
+    return true
 end
+-- Function: spell_valid
+-- Description: Checks whether a spell resource table is a legitimate
+--   skill-up candidate: the player's current job (main or sub) can
+--   actually cast it at their current level, its target type matches
+--   what's allowed (self-targeted always, enemy-targeted only if
+--   Offensive Spells is on), and it's not one of the excluded
+--   utility/exclusive spells (Teleport, Warp, Escape, Geo-buffs, etc.).
+-- Parameters:
+--   tab (table) - a res.spells entry with .levels, .targets, and .en
+-- Returns: boolean or nil - true if valid, nil/falsy otherwise
 function spell_valid(tab)
-    local valid_target = tab.targets:contains('Self') or (gs_skillup.use_offensive and tab.targets:contains('Enemy'))
+    local valid_target = tab.targets:contains('Self') or (addon_state.use_offensive and tab.targets:contains('Enemy'))
     if (tab.levels[windower.ffxi.get_player().main_job_id] and tab.levels[windower.ffxi.get_player().main_job_id] <= windower.ffxi.get_player().main_job_level or tab.levels[windower.ffxi.get_player().sub_job_id] and tab.levels[windower.ffxi.get_player().sub_job_id] <= windower.ffxi.get_player().main_job_level) and valid_target and
         not tab.en:wmatch('Teleport-*|Warp*|Tractor*|Retrace|Escape|Geo-*|Sacrifice|Odin|Alexander|Recall-*') then
         return true
     end
 end
+
+-- Function: party_index_of_target
+-- Description: Parses a target string like "<p3>" to extract which
+--   party slot number it refers to.
+-- Parameters:
+--   target (string or nil) - a target string, e.g. '<p2>', '<t>', or nil
+-- Returns: number or nil - the party slot (1-5) if target matched the
+--   "<pN>" pattern, nil otherwise
 function party_index_of_target(target)
     local idx = target and target:match('^<p(%d)>$')
     return idx and tonumber(idx)
 end
+
+-- Function: is_party_member_targetable
+-- Description: Checks whether a given party slot currently holds a
+--   live, valid, targetable member (present, has an embedded mob
+--   object, is a valid target, and isn't at 0 HP).
+-- Parameters:
+--   i (number) - the party slot number to check (1-5)
+-- Returns: boolean - true if that slot is currently targetable
 function is_party_member_targetable(i)
     local pt = windower.ffxi.get_party()
     local member = pt and pt['p'..i]
@@ -649,6 +905,14 @@ function is_party_member_targetable(i)
     end
     return (mob.hpp == nil) or (mob.hpp > 0)
 end
+
+-- Function: get_live_party_targets
+-- Description: Lists every currently-targetable party slot (including
+--   trusts, which occupy regular party slots once summoned) as target
+--   strings ready to use in a /ma or /ws command.
+-- Parameters: none
+-- Returns: table (T{} list) - target strings like {'<p1>', '<p3>'} for
+--   every currently-live, targetable party member
 function get_live_party_targets()
     local live = T{}
     for i = 1, 5 do
@@ -658,12 +922,36 @@ function get_live_party_targets()
     end
     return live
 end
+
+-- Function: skillup_cast_target
+-- Description: Determines the actual target string to use for a given
+--   spell right now. Self-only spells always target '<me>'. Spells that
+--   can also hit party members cycle through the live party (including
+--   the player themselves, via the modulo including one extra slot)
+--   using a dedicated rotation counter, so self-only spells interspersed
+--   in the rotation don't skew the party round-robin.
+-- Parameters:
+--   name (string) - the spell's localized name, used to look up its
+--     base target and party-eligibility from rotation_state.skillup_target/
+--     skillup_party_ok
+-- Returns: string - the target string to actually cast with, e.g.
+--   '<me>', '<t>', or '<p2>'
 function skillup_cast_target(name)
-    local base = gs_skill.skillup_target[name] or '<me>'
-    if base == '<me>' and gs_skill.skillup_party_ok[name] then
+    local base = rotation_state.skillup_target[name] or '<me>'
+    if base == '<me>' and rotation_state.skillup_party_ok[name] then
         local party_targets = get_live_party_targets()
         if #party_targets > 0 then
-            local idx = (gs_skill.party_cycle_index or 0) % (#party_targets + 1)
+            -- +1 slot in the modulus reserves one turn in the cycle for
+            -- self. party_cycle_index is guaranteed by
+            -- advance_skillup_count() to already point at a
+            -- non-excluded slot (or self), so no walk-forward is needed
+            -- here -- doing it at read time instead of write time was
+            -- the bug: it found a valid target by skipping an excluded
+            -- slot, but never advanced the stored counter to reflect
+            -- that skip, so the very next +1 increment could land
+            -- directly back on the same slot, casting on it twice in a
+            -- row.
+            local idx = (rotation_state.party_cycle_index or 0) % (#party_targets + 1)
             if idx > 0 then
                 return party_targets[idx]
             end
@@ -671,54 +959,151 @@ function skillup_cast_target(name)
     end
     return base
 end
+
+-- Function: has_valid_enemy_target
+-- Description: Checks whether there's a valid enemy target selected,
+--   and (if the "Require Engaged Target" toggle is on) that the player
+--   is actually engaged in combat.
+-- Parameters: none
+-- Returns: boolean - true if an enemy-targeted action could be used
+--   right now
 function has_valid_enemy_target()
     if windower.ffxi.get_mob_by_target('t') == nil then
         return false
     end
-    return (not gs_skillup.require_engaged) or get_player_status_string() == 'Engaged'
+    return (not addon_state.require_engaged) or get_player_status_string() == 'Engaged'
 end
+
+-- Function: offensive_spell_castable
+-- Description: Checks whether an offensive (enemy-targeted) spell can
+--   actually be cast right now: the "Use Offensive Spells" toggle must
+--   be on AND there must be a valid enemy target. Checking the toggle
+--   here (not just when the rotation was first built) means turning it
+--   off mid-run stops offensive spells immediately.
+-- Parameters: none
+-- Returns: boolean - true if an offensive spell could be cast right now
 function offensive_spell_castable()
-    return gs_skillup.use_offensive and has_valid_enemy_target()
+    return addon_state.use_offensive and has_valid_enemy_target()
 end
+
+-- Function: party_target_is_excluded_trust
+-- Description: Checks whether a resolved party target string (e.g.
+--   '<p2>') currently holds a Trust/party member named in
+--   TRUST_EXCLUSION_LIST (libs/spell_library.lua). Non-party target
+--   strings (e.g. '<me>', '<t>') are never excluded this way. Used by
+--   skillup_cast_target() to walk forward past an excluded Trust when
+--   choosing who to target, so one can never actually be selected.
+-- Parameters:
+--   target (string or nil) - a resolved target string, e.g. '<p2>'
+-- Returns: boolean - true if that party slot's mob name is excluded
+function party_target_is_excluded_trust(target)
+    local idx = party_index_of_target(target)
+    if not idx then return false end
+    local pt = windower.ffxi.get_party()
+    local member = pt and pt['p'..idx]
+    local name = member and member.mob and member.mob.name
+    return name ~= nil and TRUST_EXCLUSION_LIST:contains(name)
+end
+
+-- Function: skip_to_valid_target_spell
+-- Description: Advances the rotation index past any spell that needs an
+--   enemy target ('<t>') when no valid target is currently available,
+--   so the rotation doesn't get stuck retrying an uncastable spell.
+--   Bounded by the rotation's own length so it can't loop forever if
+--   every spell needs an unavailable target. Doesn't need to check for
+--   excluded Trusts separately -- skillup_cast_target() already
+--   guarantees it never resolves to one, walking forward to the next
+--   valid candidate instead.
+-- Parameters: none
+-- Returns: none (mutates rotation_state.skillup_count)
 function skip_to_valid_target_spell()
     local attempts = 0
-    while skillup_cast_target(gs_skill.skillup_spells[gs_skill.skillup_count]) == '<t>'
+    while skillup_cast_target(rotation_state.skillup_spells[rotation_state.skillup_count]) == '<t>'
         and not offensive_spell_castable()
-        and attempts < #gs_skill.skillup_spells do
-        gs_skill.skillup_count = (gs_skill.skillup_count % #gs_skill.skillup_spells) + 1
+        and attempts < #rotation_state.skillup_spells do
+        rotation_state.skillup_count = (rotation_state.skillup_count % #rotation_state.skillup_spells) + 1
         attempts = attempts + 1
     end
 end
 MIN_ACTION_DELAY = 0.2
+
+-- Function: action_prefix
+-- Description: Builds the "wait N;input" command prefix used before
+--   every /ma, /ja, /ws, or /item command. Enforces a minimum delay
+--   after cancel_spell()-equivalent moments, since the FFXI client can
+--   reject a new action with "Unable to cast spells at this time" if it
+--   arrives before an in-flight cancellation has registered server-side.
+-- Parameters:
+--   wait_time (number or nil) - desired wait in seconds; floored to
+--     MIN_ACTION_DELAY if lower (or nil)
+-- Returns: string - the command prefix, e.g. "wait 3.0;input"
 function action_prefix(wait_time)
     wait_time = math.max(wait_time or 0, MIN_ACTION_DELAY)
     return 'wait '..wait_time..';input'
 end
+
+-- Function: cast_ja
+-- Description: Uses a job ability on self by its resource ID, tracked
+--   as a pending 'ja' cast.
+-- Parameters:
+--   id (number) - the job ability's resource ID (res.job_abilities key)
+--   wait_time (number or nil) - delay before sending, see action_prefix
+-- Returns: none
 function cast_ja(id, wait_time)
     local name = res.job_abilities[id][language]
     begin_pending_cast('ja', name, '<me>')
     windower.send_command(action_prefix(wait_time)..' /ja "'..name..'" <me>')
 end
+
+-- Function: cast_self_spell
+-- Description: Casts a spell resource table on self (used for
+--   maintenance casts like Moogle Trust, Geo-Refresh, Indi-Refresh, and
+--   RDM sub Refresh/Haste, which are always self-targeted).
+-- Parameters:
+--   spell_tab (table) - a res.spells entry (or equivalent) to cast
+-- Returns: none
 function cast_self_spell(spell_tab)
     local name = spell_tab[language]
     begin_pending_cast('spell', name, '<me>')
     windower.send_command(action_prefix()..' /ma "'..name..'" <me>')
 end
--- Uses an item on self by its localized name.
+
+-- Function: use_self_item
+-- Description: Uses an item on self by its localized name (used for
+--   skill-up items and opening Ninjutsu toolbags).
+-- Parameters:
+--   name (string) - the item's localized name
+-- Returns: none
 function use_self_item(name)
     begin_pending_cast('item', name, '<me>')
     windower.send_command(action_prefix()..' /item "'..name..'" <me>')
 end
 
+-- Function: decide_and_act
+-- Description: The core pre-send decision pipeline -- this is
+-- everything GearSwap's precast() used to do automatically before
+-- every cast, now run explicitly. Checks skill cap, skips past
+-- unreachable-target spells, then in priority order: Summoning pet
+-- upkeep, MP Regain WS, skip-if-unaffordable (with an auto-heal
+-- fallback once every remaining spell has been tried), Moogle Trust,
+-- Skill Up Item / Geo's Refresh (mutually exclusive, item wins), RDM
+-- sub auto-Refresh/Haste, and finally the actual upcoming rotation
+-- spell. Called at the start of every rotation, after every successful
+-- or interrupted cast, and whenever a maintenance condition needs
+-- re-checking, so nothing ever gets sent without this full validation
+-- running first.
+-- Parameters:
+--   wait_time (number or nil) - delay before sending the next action
+-- Returns: none
 function decide_and_act(wait_time)
     if not skilluprun then return end
     if check_skill_cap() then shutdown_logoff() return end
 
     skip_to_valid_target_spell()
-    local upcoming = gs_skill.skillup_spells[gs_skill.skillup_count]
+    local upcoming = rotation_state.skillup_spells[rotation_state.skillup_count]
 
     
-    if gs_skill.skillup_type == "Summoning" then
+    if rotation_state.skillup_type == "Summoning" then
         if not pet_is_valid() then
             if get_player_status_string() ~= 'Engaged' then
                 windower.send_command('input /heal on')
@@ -746,27 +1131,43 @@ function decide_and_act(wait_time)
     -- spell is also too expensive.
     local upcoming_res = upcoming and get_spell_by_name(upcoming)
     if upcoming_res and upcoming_res.mp_cost and (upcoming_res.mp_cost + 25) > windower.ffxi.get_player().vitals.mp then
-        if gs_skillup.skipped_spells:contains(upcoming) then
-            gs_skillup.skipped_spells:clear()
+        if addon_state.skipped_spells:contains(upcoming) then
+            addon_state.skipped_spells:clear()
             if get_player_status_string() ~= 'Engaged' then
                 windower.send_command('input /heal on')
             end
             return
         end
-        gs_skillup.skipped_spells:append(upcoming)
+        addon_state.skipped_spells:append(upcoming)
         advance_and_cast_skillup_spell(wait_time)
         return
     end
 
-    -- Moogle Trust: solo only.
-    if gs_skillup.use_trust and get_party_count() == 1 and spell_usable(res.spells[931]) and upcoming ~= "Moogle" then
+    -- Moogle Trust: summon it if enabled, usable, not already the spell
+    -- being cast, not already present in the party, not summoned
+    -- moments ago, and not currently engaged -- you can't summon a
+    -- Trust while holding enmity/engaged in combat, so without this
+    -- check the addon would just keep retrying the summon every
+    -- decision cycle for as long as combat lasts, instead of skipping
+    -- it and moving on to normal spellcasting.
+    -- trust_already_present() reads live party data, which doesn't
+    -- update instantly after the summon succeeds. Without the grace
+    -- period below, decide_and_act() (called synchronously right after
+    -- a successful cast) could decide to summon Moogle again before the
+    -- party list catches up, queuing a redundant cast that the server
+    -- then rejects a few seconds later with "Unable to cast spells at
+    -- this time" once it does have Moogle and refuses a duplicate.
+    if addon_state.use_trust and spell_usable(res.spells[931]) and upcoming ~= "Moogle" and not trust_already_present("Moogle")
+        and get_player_status_string() ~= 'Engaged'
+        and (not addon_state.last_trust_summon_time or os.clock() - addon_state.last_trust_summon_time > 5) then
+        addon_state.last_trust_summon_time = os.clock()
         cast_self_spell(res.spells[931])
         return
     end
 
     -- Skill-up item and Geo's Refresh are mutually exclusive (item takes
     -- priority), matching the original file.
-    if gs_skillup.use_item and not buffactive[251] then
+    if addon_state.use_item and not buffactive[251] then
         for _, item_id in ipairs(SKILL_UP_ITEM_IDS) do
             local res_item = res.items[item_id]
             local item_name = res_item and (res_item[language] or res_item.en or res_item.english)
@@ -775,12 +1176,12 @@ function decide_and_act(wait_time)
                 return
             end
         end
-    elseif gs_skillup.use_geo then
+    elseif addon_state.use_geo then
         if windower.ffxi.get_player().main_job == "GEO" and spell_usable(res.spells[800]) and not pet_is_valid() and upcoming ~= "Geo-Refresh" then
             cast_self_spell(res.spells[800])
             return
         elseif windower.ffxi.get_player().sub_job == "GEO" and spell_usable(res.spells[770])
-            and buffactive[541] ~= (gs_skillup.use_trust and 2 or 1) and upcoming ~= "Indi-Refresh" then
+            and buffactive[541] ~= (addon_state.use_trust and 2 or 1) and upcoming ~= "Indi-Refresh" then
             cast_self_spell(res.spells[770])
             return
         end
@@ -807,9 +1208,19 @@ end
 
 -- Actually casts the current rotation entry, routing Blue Magic shield
 -- spells and Ninjutsu through their special handling first 
+-- Function: cast_upcoming_rotation_spell
+-- Description: Casts whatever the rotation currently points at, routing
+--   two special cases first: Blue Magic shield spells (which skill up
+--   via their linked job ability, Convergence/Diffusion, rather than
+--   being cast directly) and Ninjutsu (which needs a tool check/unpack
+--   before it can be cast -- see nin_tool_status). Falls through to a
+--   normal cast for everything else.
+-- Parameters:
+--   wait_time (number or nil) - delay before sending the action
+-- Returns: none
 function cast_upcoming_rotation_spell(wait_time)
     skip_to_valid_target_spell()
-    local name = gs_skill.skillup_spells[gs_skill.skillup_count]
+    local name = rotation_state.skillup_spells[rotation_state.skillup_count]
     if not name then
         cast_current_skillup_spell(wait_time)
         return
@@ -841,38 +1252,104 @@ function cast_upcoming_rotation_spell(wait_time)
     cast_current_skillup_spell(wait_time)
 end
 
+-- Function: cast_current_skillup_spell
+-- Description: Sends the actual /ma command for whatever spell the
+--   rotation currently points at, skipping past any target-requiring
+--   spell first if there's no valid target. Stops the rotation if the
+--   spell list is empty, and defensively resets to index 1 if the
+--   current index is somehow out of bounds.
+-- Parameters:
+--   wait_time (number or nil) - delay before sending the action
+-- Returns: none
 function cast_current_skillup_spell(wait_time)
     skip_to_valid_target_spell()
-    if #gs_skill.skillup_spells == 0 then
+    if #rotation_state.skillup_spells == 0 then
         skilluprun = false
         return
     end
-    if not gs_skill.skillup_spells[gs_skill.skillup_count] then
-        gs_skill.skillup_count = 1
+    if not rotation_state.skillup_spells[rotation_state.skillup_count] then
+        rotation_state.skillup_count = 1
     end
-    local target = skillup_cast_target(gs_skill.skillup_spells[gs_skill.skillup_count])
-    gs_skill.last_cast_target = target
-    begin_pending_cast('spell', gs_skill.skillup_spells[gs_skill.skillup_count], target)
-    windower.send_command(action_prefix(wait_time)..' /ma "'..gs_skill.skillup_spells[gs_skill.skillup_count]..'" '..target)
+    local target = skillup_cast_target(rotation_state.skillup_spells[rotation_state.skillup_count])
+    rotation_state.last_cast_target = target
+    begin_pending_cast('spell', rotation_state.skillup_spells[rotation_state.skillup_count], target)
+    windower.send_command(action_prefix(wait_time)..' /ma "'..rotation_state.skillup_spells[rotation_state.skillup_count]..'" '..target)
 end
+
+-- Function: advance_skillup_count
+-- Description: Advances the rotation index to the next spell
+--   (circularly), and advances the dedicated party-cycling counter too,
+--   but only if the newly-reached spell can actually use it -- this is
+--   the single place both counters move, so a retry of the same attempt
+--   (which never calls this) can't accidentally skew the party
+--   round-robin. When advancing the party counter, also skips forward
+--   past any slot currently held by an excluded Trust (see
+--   TRUST_EXCLUSION_LIST), so the counter always settles on a genuinely
+--   usable slot (or self) before skillup_cast_target() ever reads it --
+--   doing that skip at read time instead caused the same target to get
+--   cast on twice in a row (the walk-forward found a valid target by
+--   skipping the excluded slot, but never advanced the stored counter
+--   to reflect it, so the next naive +1 landed right back on it).
+--   Bounded so it can't loop forever if every party member happens to
+--   be excluded.
+-- Parameters: none
+-- Returns: none (mutates rotation_state.skillup_count/party_cycle_index)
 function advance_skillup_count()
-    gs_skill.skillup_count = (gs_skill.skillup_count % #gs_skill.skillup_spells) + 1
-    local name = gs_skill.skillup_spells[gs_skill.skillup_count]
-    if gs_skill.skillup_party_ok[name] then
-        gs_skill.party_cycle_index = (gs_skill.party_cycle_index or 0) + 1
+    rotation_state.skillup_count = (rotation_state.skillup_count % #rotation_state.skillup_spells) + 1
+    local name = rotation_state.skillup_spells[rotation_state.skillup_count]
+    if rotation_state.skillup_party_ok[name] then
+        rotation_state.party_cycle_index = (rotation_state.party_cycle_index or 0) + 1
+        local party_targets = get_live_party_targets()
+        local total = #party_targets + 1
+        local attempts = 0
+        while attempts < total do
+            local idx = rotation_state.party_cycle_index % total
+            if idx == 0 or not party_target_is_excluded_trust(party_targets[idx]) then
+                break
+            end
+            rotation_state.party_cycle_index = rotation_state.party_cycle_index + 1
+            attempts = attempts + 1
+        end
     end
 end
--- Advances the rotation to the next spell, then casts it (see above).
+
+-- Function: advance_and_cast_skillup_spell
+-- Description: Advances the rotation to the next spell, then re-runs
+--   the full decision pipeline for it (rather than casting directly),
+--   so the newly-reached spell still gets fully validated (MP check,
+--   maintenance buffs, etc.) before anything is sent.
+-- Parameters:
+--   wait_time (number or nil) - delay before sending the next action
+-- Returns: none
 function advance_and_cast_skillup_spell(wait_time)
     advance_skillup_count()
     decide_and_act(wait_time)
 end
--- Retries a specific named spell (not necessarily the current rotation index --
--- used when retrying whatever spell was actually interrupted) on its own target.
+
+-- Function: shutdown_logoff
+-- Description: Announces that skillup has stopped (the category is
+--   fully capped, with no more queued categories to chain to) and
+--   refreshes the display. Despite the name, no actual shutdown/logoff
+--   happens here -- that option was removed; skillup just stops.
+-- Parameters: none
+-- Returns: none
 function shutdown_logoff()
     windower.add_to_chat(123,"Stopping skillup")
     updatedisplay()
 end
+
+-- Function: nin_tool_status
+-- Description: Checks whether a Ninjutsu spell is castable right now,
+--   and if not, whether opening a Toolbag would make it so. Ninjutsu
+--   tools are consumable and get used automatically as part of the
+--   /ma cast itself -- no separate /item step is needed for a loose
+--   tool, only for unpacking a toolbag into loose tools first.
+-- Parameters:
+--   name (string) - the Ninjutsu spell's localized name
+-- Returns: status (string), bag_name (string or nil) - status is one of
+--   'cast' (a loose tool is on hand, cast directly), 'unpack' (no loose
+--   tool, but a toolbag is available and toolbag use is enabled --
+--   bag_name is the toolbag to open), or 'none' (nothing usable)
 function nin_tool_status(name)
     local tools = NINJUTSU_TOOL_MAP[name]
     if not tools then
@@ -884,7 +1361,7 @@ function nin_tool_status(name)
     if (tb and has_item_name(tb)) or (utb and has_item_name(utb)) then
         return 'cast'
     end
-    if not gs_skillup.use_toolbags then
+    if not addon_state.use_toolbags then
         return 'none'
     end
     local primary_bag = TOOLBAG_MAP[tools.primary]
@@ -896,98 +1373,106 @@ function nin_tool_status(name)
     end
     return 'none'
 end
+-- Function: build_output_status_text
+-- Description: Builds the full plain-text status string shown in the
+--   Main tab's output panel: active toggles, current mode, the
+--   skill-up queue (with done/current/upcoming coloring, or a plain
+--   preview of checked-but-not-started categories), the active
+--   category's skill level(s), started/stopped state, and the
+--   skillups-per-hour/total-skillups counters.
+-- Parameters: none
+-- Returns: string - the full multi-line status text, ready to display
 function build_output_status_text()
     local lines = L{}
-    if gs_skillup.test_mode then
+    if addon_state.test_mode then
         lines:append('--TEST MODE--')
     end
     lines:append('--Skill Up--')
-    if gs_skillup.use_trust then lines:append('Using Moogle Trust') end
-    if gs_skillup.use_geo then lines:append("Using Geo's Refresh") end
-    if gs_skillup.use_item then lines:append('Using Skill Up Item') end
-    if gs_skillup.use_mp_ws then lines:append('Using MP Regain WS') end
-    if gs_skillup.use_offensive then lines:append('Using Offensive Spells') end
-    if not gs_skillup.require_engaged then lines:append('Not Requiring Engaged Target') end
-    if gs_skillup.test_mode then lines:append('TEST MODE: Skill Cap Ignored') end
+    if addon_state.use_trust then lines:append('Using Moogle Trust') end
+    if addon_state.use_geo then lines:append("Using Geo's Refresh") end
+    if addon_state.use_item then lines:append('Using Skill Up Item') end
+    if addon_state.use_mp_ws then lines:append('Using MP Regain WS') end
+    if addon_state.use_offensive then lines:append('Using Offensive Spells') end
+    if not addon_state.require_engaged then lines:append('Not Requiring Engaged Target') end
+    if addon_state.test_mode then lines:append('TEST MODE: Skill Cap Ignored') end
     lines:append('')
-    lines:append('Mode: '..(gs_skill.skillup_type or 'None'))
+    lines:append('Mode: '..(rotation_state.skillup_type or 'None'))
+    local checked_queue = build_queue_from_checkboxes()
+    local showing_active_queue = rotation_state.skillup_queue and #rotation_state.skillup_queue > 0
+        and queues_equal(checked_queue, rotation_state.skillup_queue)
+    if showing_active_queue then
+        local queue_parts = {}
+        for i, cat in ipairs(rotation_state.skillup_queue) do
+            if i < rotation_state.queue_index then
+                table.insert(queue_parts, '\\cs(46,204,113)'..cat..'\\cr')
+            elseif i == rotation_state.queue_index then
+                table.insert(queue_parts, '\\cs(94,160,255)['..cat..']\\cr')
+            else
+                table.insert(queue_parts, cat)
+            end
+        end
+        lines:append('Queue: '..table.concat(queue_parts, ' -> '))
+    elseif #checked_queue > 0 then
+        lines:append('Queue (not started): '..table.concat(checked_queue, ' -> '))
+    end
 
     local skill = {
-        Healing = (skill_is_genuinely_capped('Healing Magic') and "Capped" or gs_skillup.skill['Healing Magic Level']) or 0,
-        Enhancing = (skill_is_genuinely_capped('Enhancing Magic') and "Capped" or gs_skillup.skill['Enhancing Magic Level']) or 0,
-        Summoning = (skill_is_genuinely_capped('Summoning Magic') and "Capped" or gs_skillup.skill['Summoning Magic Level']) or 0,
-        Ninjutsu = (skill_is_genuinely_capped('Ninjutsu') and "Capped" or gs_skillup.skill['Ninjutsu Level']) or 0,
-        Blue = (skill_is_genuinely_capped('Blue Magic') and "Capped" or gs_skillup.skill['Blue Magic Level']) or 0,
-        Elemental = (skill_is_genuinely_capped('Elemental Magic') and "Capped" or gs_skillup.skill['Elemental Magic Level']) or 0,
-        Dark = (skill_is_genuinely_capped('Dark Magic') and "Capped" or gs_skillup.skill['Dark Magic Level']) or 0,
-        Divine = (skill_is_genuinely_capped('Divine Magic') and "Capped" or gs_skillup.skill['Divine Magic Level']) or 0,
-        Enfeebling = (skill_is_genuinely_capped('Enfeebling Magic') and "Capped" or gs_skillup.skill['Enfeebling Magic Level']) or 0,
+        Healing = (skill_is_genuinely_capped('Healing Magic') and "Capped" or addon_state.skill['Healing Magic Level']) or 0,
+        Enhancing = (skill_is_genuinely_capped('Enhancing Magic') and "Capped" or addon_state.skill['Enhancing Magic Level']) or 0,
+        Summoning = (skill_is_genuinely_capped('Summoning Magic') and "Capped" or addon_state.skill['Summoning Magic Level']) or 0,
+        Ninjutsu = (skill_is_genuinely_capped('Ninjutsu') and "Capped" or addon_state.skill['Ninjutsu Level']) or 0,
+        Blue = (skill_is_genuinely_capped('Blue Magic') and "Capped" or addon_state.skill['Blue Magic Level']) or 0,
+        Elemental = (skill_is_genuinely_capped('Elemental Magic') and "Capped" or addon_state.skill['Elemental Magic Level']) or 0,
+        Dark = (skill_is_genuinely_capped('Dark Magic') and "Capped" or addon_state.skill['Dark Magic Level']) or 0,
+        Divine = (skill_is_genuinely_capped('Divine Magic') and "Capped" or addon_state.skill['Divine Magic Level']) or 0,
+        Enfeebling = (skill_is_genuinely_capped('Enfeebling Magic') and "Capped" or addon_state.skill['Enfeebling Magic Level']) or 0,
     }
 
-    if gs_skill.skillup_type == 'Singing' then
-        lines:append('Singing Skill LVL: '..tostring(skill_is_genuinely_capped('Singing') and "Capped" or (gs_skillup.skill['Singing Level'] or 0)))
-        lines:append('String Skill LVL: '..tostring(skill_is_genuinely_capped('Stringed Instrument') and "Capped" or (gs_skillup.skill['Stringed Instrument Level'] or 0)))
-        lines:append('Wind Skill LVL: '..tostring(skill_is_genuinely_capped('Wind Instrument') and "Capped" or (gs_skillup.skill['Wind Instrument Level'] or 0)))
-    elseif gs_skill.skillup_type == 'Geomancy' then
-        lines:append('Geomancy Skill LVL: '..tostring(skill_is_genuinely_capped('Geomancy') and "Capped" or (gs_skillup.skill['Geomancy Level'] or 0)))
-        lines:append('Handbell Skill LVL: '..tostring(skill_is_genuinely_capped('Handbell') and "Capped" or (gs_skillup.skill['Handbell Level'] or 0)))
+    if rotation_state.skillup_type == 'Singing' then
+        lines:append('Singing Skill LVL: '..tostring(skill_is_genuinely_capped('Singing') and "Capped" or (addon_state.skill['Singing Level'] or 0)))
+        lines:append('String Skill LVL: '..tostring(skill_is_genuinely_capped('Stringed Instrument') and "Capped" or (addon_state.skill['Stringed Instrument Level'] or 0)))
+        lines:append('Wind Skill LVL: '..tostring(skill_is_genuinely_capped('Wind Instrument') and "Capped" or (addon_state.skill['Wind Instrument Level'] or 0)))
+    elseif rotation_state.skillup_type == 'Geomancy' then
+        lines:append('Geomancy Skill LVL: '..tostring(skill_is_genuinely_capped('Geomancy') and "Capped" or (addon_state.skill['Geomancy Level'] or 0)))
+        lines:append('Handbell Skill LVL: '..tostring(skill_is_genuinely_capped('Handbell') and "Capped" or (addon_state.skill['Handbell Level'] or 0)))
     else
-        lines:append('Skilling LVL: '..tostring(skill[gs_skill.skillup_type] or 0))
+        lines:append('Skilling LVL: '..tostring(skill[rotation_state.skillup_type] or 0))
     end
     lines:append('')
     lines:append('Will Stop When Skillup Done')
     lines:append('Skillup '..(skilluprun and '\\cs(46,204,113)Started\\cr' or '\\cs(231,76,60)Stopped\\cr'))
-    if os.clock() - gs_skillup.skill_ph_last_update >= 30 then
-        gs_skillup.skill_ph_cache = get_rate(gs_skillup.skill_ups) or 0
-        gs_skillup.skill_ph_last_update = os.clock()
+    if os.clock() - addon_state.skill_ph_last_update >= 30 then
+        addon_state.skill_ph_cache = get_rate(addon_state.skill_ups) or 0
+        addon_state.skill_ph_last_update = os.clock()
     end
-    lines:append('Skillups Per Hour \\cs(241,196,15)'..string.format('%.1f', gs_skillup.skill_ph_cache)..'\\cr')
-    lines:append('Total Skillups \\cs(241,196,15)'..string.format('%.1f', gs_skillup.total_skill_ups or 0)..'\\cr')
+    lines:append('Skillups Per Hour \\cs(241,196,15)'..string.format('%.1f', addon_state.skill_ph_cache)..'\\cr')
+    lines:append('Total Skillups \\cs(241,196,15)'..string.format('%.1f', addon_state.total_skill_ups or 0)..'\\cr')
     return lines:concat('\n')
 end
 
-
+-- Function: updatedisplay
+-- Description: Refreshes the Main tab's output panel, if it's currently
+--   the visible tab and the settings UI actually exists yet. Called
+--   periodically and after any command that might change something the
+--   status text shows.
+-- Parameters: none
+-- Returns: none
 function updatedisplay()
     if not settings_state.hidden and settings_state.active_main == "Main" and settings_ui.backdrop and settings_ui.output_window then
         settings_ui.output_window:text(build_output_status_text())
     end
 end
-function ensure_dir_path(path)
-    local accum = nil
-    for part in path:gmatch('[^/\\]+') do
-        accum = accum and (accum..'/'..part) or part
-        if not windower.dir_exists(accum) then
-            windower.create_dir(accum)
-        end
-    end
-end
+-- ensure_dir_path, file_exists, copy_file now live in libs/utils.lua
 
-function file_exists(path)
-    local f = io.open(path, 'r')
-    if f then
-        f:close()
-        return true
-    end
-    return false
-end
-
-function copy_file(src, dst)
-    local sf = io.open(src, 'r')
-    if not sf then return false end
-    local content = sf:read('*a')
-    sf:close()
-    local df = io.open(dst, 'w')
-    if not df then return false end
-    df:write(content)
-    df:close()
-    return true
-end
-
--- Loads this character's own settings.lua from
--- data/<character>/settings.lua (creating it by copying this addon's
--- root settings.lua as a starting template, the first time this
--- character ever runs the addon). This sets the global user_settings
--- table, same as require('settings') used to.
+-- Function: load_user_settings
+-- Description: Loads this character's own settings.lua from
+--   data/<character>/settings.lua (creating it by copying this addon's
+--   root settings.lua as a starting template, the first time this
+--   character ever runs the addon). Sets the global user_settings
+--   table, same as require('settings') used to before settings became
+--   per-character.
+-- Parameters: none
+-- Returns: none
 function load_user_settings()
     local char_name = windower.ffxi.get_player() and windower.ffxi.get_player().name
     local dir = windower.addon_path..'data/'..tostring(char_name)
@@ -1001,6 +1486,12 @@ function load_user_settings()
     dofile(path)
 end
 
+-- Function: file_write
+-- Description: Saves the panel's current position to
+--   data/<character>/Saves/skillup_data.lua, so it can be restored on
+--   next load (only happens if user_settings.save_settings is true).
+-- Parameters: none
+-- Returns: none
 function file_write()
     ensure_dir_path(windower.addon_path..'data/'..windower.ffxi.get_player().name..'/Saves')
     local file = io.open(windower.addon_path..'data/'..windower.ffxi.get_player().name..'/Saves/skillup_data.lua',"w")
@@ -1010,53 +1501,63 @@ function file_write()
         '')
     file:close() 
 end
--- Manual hit-test against a text object's known padded bounds (the same
--- padding used for the tab highlight rectangles), since inactive tabs no
--- longer have their own background object to hover-test against.
-function point_in_padded_bounds(t, x, y, width, height)
-    local tx, ty = t:pos()
-    return x >= tx - 4 and x <= tx - 4 + width and y >= ty - 2 and y <= ty - 2 + height
-end
+-- point_in_padded_bounds now lives in libs/utils.lua
 
+-- Function: set_color
+-- Description: Sets the hover-highlight state for every menu/toggle
+--   button: the one matching `name` is marked hovered (false), every
+--   other one is marked not-hovered (true). Passing "none" (or any ID
+--   that matches nothing) clears all highlighting.
+-- Parameters:
+--   name (string) - the ID of the currently-hovered button, or "none"
+-- Returns: none (mutates addon_state.color)
 function set_color(name)
-    for i, v in pairs(gs_skillup.color) do
+    for i, v in pairs(addon_state.color) do
         if i == name then
-            gs_skillup.color[i] = false
+            addon_state.color[i] = false
         else
-            gs_skillup.color[i] = true
+            addon_state.color[i] = true
         end
     end
 end
 
--- Shows a brief confirmation next to Save/Cancel (e.g. "Saved!"),
--- auto-hidden after a few seconds by the prerender check further down.
+-- Function: show_footer_notice
+-- Description: Shows a brief confirmation message next to Save/Cancel
+--   (e.g. "Saved!" or "Canceled"), auto-hidden after 2.5 seconds by the
+--   prerender check that watches footer_notice_expire.
+-- Parameters:
+--   text (string) - the message to display
+--   r (number) - red component of the text color (0-255)
+--   g (number) - green component of the text color (0-255)
+--   b (number) - blue component of the text color (0-255)
+-- Returns: none
 function show_footer_notice(text, r, g, b)
     if not settings_ui.footer_notice then return end
     settings_ui.footer_notice:text('\\cs('..r..','..g..','..b..')'..text..'\\cr')
     settings_ui.footer_notice:show()
     settings_ui.footer_notice_expire = os.clock() + 2.5
 end
-function get_rate(tab)
-    local t = os.clock()
-    local running_total = 0
-    local oldest = nil
-    for ts,points in pairs(tab) do
-        if t - ts > 3600 then
-            tab[ts] = nil
-        else
-            running_total = running_total + points
-            if not oldest or ts < oldest then
-                oldest = ts
-            end
-        end
+
+-- Function: refresh_unsaved_indicator
+-- Description: Shows a persistent "Unsaved Changes" warning in the
+--   footer whenever settings have been modified but not yet saved.
+--   Yields to a currently-active transient notice (e.g. right after
+--   clicking Save/Cancel) rather than fighting it for the same text
+--   object -- if a transient message is showing, this does nothing
+--   until it expires.
+-- Parameters: none
+-- Returns: none
+function refresh_unsaved_indicator()
+    if not settings_ui.footer_notice then return end
+    if settings_ui.footer_notice_expire then return end
+    if settings_state.unsaved_changes then
+        settings_ui.footer_notice:text('\\cs(230,180,40)Unsaved Changes\\cr')
+        settings_ui.footer_notice:show()
+    else
+        settings_ui.footer_notice:hide()
     end
-    if not oldest or running_total == 0 then
-        return 0
-    end
-    
-    local elapsed = math.max(t - oldest, 1)
-    return running_total * (3600 / elapsed)
 end
+-- get_rate now lives in libs/utils.lua
 windower.register_event('incoming chunk', function(id, data, modified, injected, blocked)
     if id == 0x062 then
         local ok, packet = pcall(packets.parse, 'incoming', data)
@@ -1082,7 +1583,7 @@ windower.register_event('incoming chunk', function(id, data, modified, injected,
                 log_debug_line('  '..line)
             end
         end
-        gs_skillup.skill = packet
+        addon_state.skill = packet
         updatedisplay()
     end
 end)
@@ -1095,6 +1596,11 @@ SETTINGS_TAB_GAP = 20   -- gap between tabs (uniform width = largest tab)
 SETTINGS_COL_GAP = 24   -- gap between grid columns, laid out by estimated width
 
 -- Globals tab: simple boolean toggles 
+-- Commands that change something save_settings_file() actually persists
+-- (as opposed to test_mode, show/hide, zfix's own display, debug
+-- toggles, etc., which aren't part of settings.lua at all).
+SETTINGS_DIRTYING_COMMANDS = S{'settrust','setgeo','setitem','setmpws','setoffensive','setengaged','setthreshold','settrackwind','settrackstring','settoolbags','zfix'}
+
 GLOBAL_TOGGLE_DEFS = {
     {id='TRUST', label="Use Moogle Trust",          command='settrust',      field='use_trust'},
     {id='REF',   label="Use Geo's Refresh",         command='setgeo',        field='use_geo'},
@@ -1125,9 +1631,19 @@ SINGING_TRACK_DEFS = {
 -- rendered as two lines each (title in gold, description plain).
 HELP_ENTRIES = {
     {title="-- Main tab --", text=""},
-    {title="Start Healing/Enhancing/etc.", text="Begins the skill-up rotation for that"},
-    {title="", text="magic type, using the spells checked"},
-    {title="Stop Skillups", text="Stops skillups after the current rotation."},
+    {title="Category checkboxes", text="Check one or more categories, then"},
+    {title="", text="press Start. With multiple checked, skillup"},
+    {title="", text="works through them in order, moving to the"},
+    {title="", text="next one automatically once each caps."},
+    {title="Start", text="Begins (or resumes) the checked queue."},
+    {title="", text="While a queue is paused, Start resumes it as-"},
+    {title="", text="is -- checkbox changes only apply once you"},
+    {title="", text="start a new queue (current one fully done)."},
+    {title="Stop Skillups", text="Pauses the queue -- press Start again to"},
+    {title="", text="resume from where it left off."},
+    {title="Output panel", text="Shows the active category plus the full"},
+    {title="", text="queue -- done (green), current [bracketed,"},
+    {title="", text="blue], and upcoming (plain)."},
     {title="Test Mode (Ignore Cap)", text="Ignores the skill cap so skillup keeps"},
     {title="", text="running past capping. For testing only."},
 
@@ -1195,6 +1711,7 @@ settings_state = {
     active_main = SETTINGS_MAIN_TABS[1],
     active_sub = nil,
     hidden = false,
+    unsaved_changes = false,
 }
 settings_ui = {
     content_right = 0,  -- real default so rebuild_settings_grid() never sees nil, even if called before create_settings_ui() has run
@@ -1225,32 +1742,16 @@ settings_ui = {
     cancel_button = nil,
 }
 
--- Estimates rendered text width/height from character count rather than
--- texts.extents() 
-function estimate_text_size(str, font_size)
-    local visible = str:gsub('\\cs%(%d+,%d+,%d+%)', ''):gsub('\\cr', '')
-    local longest = 0
-    local line_count = 0
-    for line in (visible..'\n'):gmatch('([^\n]*)\n') do
-        line_count = line_count + 1
-        if #line > longest then longest = #line end
-    end
-    local width = longest * font_size * 0.9 + 20
-    local height = math.max(line_count, 1) * font_size * 2.0
-    return width, height
-end
+-- estimate_text_size, clamp_panel_position now live in libs/utils.lua
 
--- Keeps the panel on-screen. Called whenever it's dragged.
-function clamp_panel_position(x, y)
-    local screen = windower.get_windower_settings()
-    if not screen then return x, y end
-    local x_max = math.max(0, screen.x_res - 200)
-    local y_max = math.max(0, screen.y_res - 200)
-    x = math.min(math.max(x, 0), x_max)
-    y = math.min(math.max(y, 0), y_max)
-    return x, y
-end
-
+-- Function: ensure_spell_library_loaded
+-- Description: Lazily loads libs/spell_library.lua (only the first time
+--   it's needed, unlike libs/utils.lua and libs/skillup_helpers.lua
+--   which load unconditionally at parse time) and builds the spell
+--   library from res.spells if it hasn't been built yet.
+-- Parameters: none
+-- Returns: none (sets the global build_spell_library function and
+--   settings_state.library)
 function ensure_spell_library_loaded()
     if not build_spell_library then
         dofile(windower.addon_path..'libs/spell_library.lua')
@@ -1260,6 +1761,13 @@ function ensure_spell_library_loaded()
     end
 end
 
+-- Function: init_settings_selection
+-- Description: Rebuilds settings_state.selection (the working, not-yet-
+--   saved spell checkbox state) from whatever's currently persisted in
+--   user_settings.user_spells. Called on load and whenever Cancel is
+--   clicked, to discard any unsaved spell-selection changes.
+-- Parameters: none
+-- Returns: none (mutates settings_state.selection)
 function init_settings_selection()
     settings_state.selection = {}
     for _, category in ipairs(SETTINGS_MAIN_TABS) do
@@ -1275,6 +1783,12 @@ function init_settings_selection()
     end
 end
 
+-- Function: destroy_settings_ui
+-- Description: Destroys every settings UI object (backdrop, border,
+--   tabs, columns, buttons, etc.) and resets settings_ui back to its
+--   empty starting shape. Called on addon unload.
+-- Parameters: none
+-- Returns: none (mutates/replaces the global settings_ui table)
 function destroy_settings_ui()
     if settings_ui.border then settings_ui.border:destroy() end
     if settings_ui.backdrop then settings_ui.backdrop:destroy() end
@@ -1302,6 +1816,13 @@ function destroy_settings_ui()
     settings_ui = {content_right=0, border=nil, backdrop=nil, header_panel=nil, sep_tabs=nil, sep_subtabs=nil, sep_footer=nil, title=nil, output_window=nil, hide_button=nil, main_tabs={}, main_tab_highlight=nil, sub_tabs={}, sub_tab_highlight=nil, singing_options=nil, ninjutsu_options=nil, columns={}, column_data={}, save_button=nil, cancel_button=nil}
 end
 
+-- Function: sorted_sub_tab_names
+-- Description: Lists a category's sub-tab names in alphabetical order,
+--   except "Other" is always sorted last regardless of alphabetical
+--   position.
+-- Parameters:
+--   category (string) - a spell category name, e.g. "Healing"
+-- Returns: table - an ordered list of sub-tab name strings
 function sorted_sub_tab_names(category)
     local names = {}
     for sub_name, _ in pairs(settings_state.library[category]) do
@@ -1315,11 +1836,14 @@ function sorted_sub_tab_names(category)
     return names
 end
 
--- Resizes the backdrop draw-box to contain whatever's currently on
--- screen (main tabs, sub tabs, and however many grid columns there are).
--- Sizes/positions the backdrop to actually contain everything currently
--- on screen, computed from real measured positions/extents of every
--- element 
+-- Function: resize_settings_backdrop
+-- Description: Resizes and repositions the backdrop, border, header
+--   panel, separator lines, and hide button to contain whatever's
+--   currently on screen (main tabs, sub-tabs, and however many grid
+--   columns there are), based on the tracked content_right/
+--   footer_bottom_y bounds accumulated while building the current tab.
+-- Parameters: none
+-- Returns: none
 function resize_settings_backdrop()
     local bx = settings_origin_x - SETTINGS_PAD
     local by = settings_origin_y - SETTINGS_PAD
@@ -1356,6 +1880,13 @@ end
 
 -- Positions Save/Cancel just below the grid's bottom edge, and records
 -- where the content ends for resize_settings_backdrop.
+-- Function: position_settings_footer
+-- Description: Positions the Save button, Cancel button, and footer
+--   notice slot just below the grid's bottom edge, and records the
+--   overall content bounds (content_right, footer_bottom_y) used by
+--   resize_settings_backdrop().
+-- Parameters: none
+-- Returns: none
 function position_settings_footer()
     local footer_y = settings_ui.grid_bottom_y + 28
     local save_w, save_h = estimate_text_size('[ Save ]', 13)
@@ -1369,6 +1900,17 @@ function position_settings_footer()
     settings_ui.footer_bottom_y = footer_y + math.max(save_h, cancel_h)
 end
 
+-- Function: rebuild_settings_grid
+-- Description: Destroys and rebuilds the grid content area for
+--   whichever tab is currently active. Special-cases "Main" (menu
+--   checkboxes on the left, live status output on the right), "Globals"
+--   (toggle checkboxes plus the MP Regain WS threshold radio options),
+--   and "Help" (a multi-column reference list); every other tab renders
+--   its spell checkboxes, auto-split into columns of SETTINGS_MAX_ROWS
+--   each. Finishes by repositioning the footer and resizing the
+--   backdrop to fit whatever was just built.
+-- Parameters: none
+-- Returns: none
 function rebuild_settings_grid()
     for _, t in ipairs(settings_ui.columns) do t:destroy() end
     settings_ui.columns = {}
@@ -1382,7 +1924,20 @@ function rebuild_settings_grid()
         local menu_entries = {}
         for _, entry in ipairs(main_menu_layout()) do
             if entry then
-                local label = (gs_skillup.color[entry.id] and entry.label) or ('\\cs(94,160,255)'..entry.label..'\\cr')
+                local label
+                if entry.category then
+                    local checked = addon_state.queue_selected[entry.category]
+                    local base = (checked and '[✓] ' or '[ ] ')..entry.label
+                    if not addon_state.color[entry.id] then
+                        label = '\\cs(94,160,255)'..base..'\\cr'
+                    elseif checked then
+                        label = '\\cs(46,204,113)'..base..'\\cr'
+                    else
+                        label = base
+                    end
+                else
+                    label = (addon_state.color[entry.id] and entry.label) or ('\\cs(94,160,255)'..entry.label..'\\cr')
+                end
                 menu_lines:append(label)
                 menu_entries[#menu_entries+1] = entry
             else
@@ -1471,13 +2026,13 @@ function rebuild_settings_grid()
         local lines = L{}
         local entries = {}
         for _, def in ipairs(GLOBAL_TOGGLE_DEFS) do
-            local checked = gs_skillup[def.field]
+            local checked = addon_state[def.field]
             lines:append(checked and ('\\cs(46,204,113)[✓] '..def.label..'\\cr') or ('[ ] '..def.label))
             table.insert(entries, def)
             lines:append('')
             table.insert(entries, {command=nil})
         end
-        if gs_skillup.use_mp_ws then
+        if addon_state.use_mp_ws then
             lines:append('')
             table.insert(entries, {command=nil})
             lines:append('\\cs(150,155,165)MP Regain WS Threshold -- with "Use MP Regain WS" on, fires the ready weapon skill once your MP% drops to or below this value:\\cr')
@@ -1548,6 +2103,16 @@ function rebuild_settings_grid()
     resize_settings_backdrop()
 end
 
+-- Function: rebuild_settings_sub_tabs
+-- Description: Destroys and rebuilds the sub-tab row for whichever main
+--   tab is currently active. Special-cases Ninjutsu (renders the
+--   toolbag-use checkbox above the sub-tabs) and Singing (renders the
+--   instrument-tracking checkboxes above the sub-tabs); "Globals",
+--   "Main", and "Help" have no sub-tabs at all. Selects the
+--   alphabetically-first sub-tab as active, then cascades into
+--   rebuild_settings_grid() to render its content.
+-- Parameters: none
+-- Returns: none
 function rebuild_settings_sub_tabs()
     for _, t in pairs(settings_ui.sub_tabs) do t:destroy() end
     settings_ui.sub_tabs = {}
@@ -1563,7 +2128,7 @@ function rebuild_settings_sub_tabs()
 
     if settings_state.active_main == "Ninjutsu" then
         settings_ui.ninjutsu_options = {}
-        local checked = gs_skillup.use_toolbags
+        local checked = addon_state.use_toolbags
         local display = (checked and '\\cs(46,204,113)[✓] Allow Ninja Tool Toolbag Use\\cr' or '[ ] Allow Ninja Tool Toolbag Use')
         local check_t = texts.new({pos={x=settings_origin_x, y=sub_y}, text={font='Segoe UI Symbol', size=11}, bg={alpha=0}, flags={draggable=false}})
         check_t:text(display)
@@ -1585,8 +2150,8 @@ function rebuild_settings_sub_tabs()
 
     if settings_state.active_main == "Singing" then
         settings_ui.singing_options = {}
-        local wind_checked = gs_skillup.track_wind_instrument
-        local string_checked = gs_skillup.track_string_instrument
+        local wind_checked = addon_state.track_wind_instrument
+        local string_checked = addon_state.track_string_instrument
         local wind_display = (wind_checked and '\\cs(46,204,113)[✓] Track Wind Instrument\\cr' or '[ ] Track Wind Instrument')
         local string_display = (string_checked and '\\cs(46,204,113)[✓] Track String Instrument\\cr' or '[ ] Track String Instrument')
         local wind_t = texts.new({pos={x=settings_origin_x, y=sub_y}, text={font='Segoe UI Symbol', size=11}, bg={alpha=0}, flags={draggable=false}})
@@ -1654,6 +2219,15 @@ function rebuild_settings_sub_tabs()
     rebuild_settings_grid()
 end
 
+-- Function: select_settings_main_tab
+-- Description: Switches the active main tab, recoloring the newly-
+--   active tab's text and moving the single main-tab highlight
+--   rectangle to sit behind it, then cascades into
+--   rebuild_settings_sub_tabs() to rebuild everything below.
+-- Parameters:
+--   category (string) - the tab name to switch to, e.g. "Healing" or
+--     "Globals"
+-- Returns: none
 function select_settings_main_tab(category)
     settings_state.active_main = category
     for cat, t in pairs(settings_ui.main_tabs) do
@@ -1666,6 +2240,15 @@ function select_settings_main_tab(category)
     rebuild_settings_sub_tabs()
 end
 
+-- Function: select_settings_sub_tab
+-- Description: Switches the active sub-tab within the current category,
+--   recoloring it and moving the sub-tab highlight rectangle, then
+--   cascades into rebuild_settings_grid() to rebuild the spell checkbox
+--   columns for it.
+-- Parameters:
+--   sub_name (string) - the sub-tab name to switch to, e.g. "Cure" or
+--     "Offensive"
+-- Returns: none
 function select_settings_sub_tab(sub_name)
     settings_state.active_sub = sub_name
     for name, t in pairs(settings_ui.sub_tabs) do
@@ -1678,12 +2261,31 @@ function select_settings_sub_tab(sub_name)
     rebuild_settings_grid()
 end
 
+-- Function: toggle_settings_spell
+-- Description: Toggles whether a spell is checked in the active
+--   category's working selection, marks settings as unsaved, and
+--   refreshes both the unsaved indicator and the grid display.
+-- Parameters:
+--   spell_name (string) - the localized spell name to toggle
+-- Returns: none (mutates settings_state.selection)
 function toggle_settings_spell(spell_name)
     local sel = settings_state.selection[settings_state.active_main]
     sel[spell_name] = not sel[spell_name] or nil
+    settings_state.unsaved_changes = true
+    refresh_unsaved_indicator()
     rebuild_settings_grid()
 end
 
+-- Function: create_settings_ui
+-- Description: Builds the entire settings panel from scratch: border,
+--   backdrop, header shading, separator lines, title, output window,
+--   hide button, main tabs and their highlight, and the Save/Cancel/
+--   footer-notice row. Called once on addon load, and again by the
+--   periodic UI refresh (see UI_REFRESH_INTERVAL) if that's enabled.
+--   Cascades into rebuild_settings_sub_tabs() at the end to build
+--   everything below the tab row for whichever tab is active.
+-- Parameters: none
+-- Returns: none
 function create_settings_ui()
     settings_ui.content_right = settings_origin_x
 
@@ -1853,6 +2455,13 @@ function create_settings_ui()
     rebuild_settings_sub_tabs()  -- cascades: sub-tabs -> grid -> footer -> backdrop resize
 end
 
+-- Function: serialize_spell_names
+-- Description: Converts a list of spell names into a sorted, escaped
+--   Lua T{...} literal string, ready to write directly into
+--   settings.lua.
+-- Parameters:
+--   names (table) - a list of spell name strings
+-- Returns: string - a Lua source literal, e.g. "T{'Cure','Cure II'}"
 function serialize_spell_names(names)
     local sorted = {}
     for _, n in ipairs(names) do table.insert(sorted, n) end
@@ -1864,14 +2473,21 @@ function serialize_spell_names(names)
     return 'T{'..table.concat(parts, ',')..'}'
 end
 
--- Commits the working selection into the live in-memory user_settings
--- (so the change takes effect immediately, no reload needed) and
--- rewrites settings.lua so it persists across restarts. This regenerates
--- the whole file -- any hand-added comments beyond the standard header
--- won't survive a save from this UI.
+-- Function: save_settings_file
+-- Description: Commits the working spell selections into the live
+--   in-memory user_settings (so the change takes effect immediately,
+--   no reload needed) and rewrites this character's settings.lua so it
+--   persists across restarts. This regenerates the whole file -- any
+--   hand-added comments beyond the standard header won't survive a
+--   save from this UI. If skillup was running when Save was clicked,
+--   stops it first and restarts the same category afterward so it
+--   picks up the freshly-saved spell list.
+-- Parameters: none
+-- Returns: boolean - true if the file was written successfully, false
+--   if it couldn't be opened for writing
 function save_settings_file()
     local was_running = skilluprun
-    local running_category = gs_skill.skillup_type
+    local running_category = rotation_state.skillup_type
     if was_running then
         self_command('skillstop')
     end
@@ -1913,13 +2529,13 @@ function save_settings_file()
     table.insert(lines, "    save_settings = "..tostring(user_settings.save_settings)..",")
     table.insert(lines, "    mp_ws_threshold = "..tostring(user_settings.mp_ws_threshold)..",")
     for _, def in ipairs(GLOBAL_TOGGLE_DEFS) do
-        table.insert(lines, "    "..def.field.." = "..tostring(gs_skillup[def.field])..",")
+        table.insert(lines, "    "..def.field.." = "..tostring(addon_state[def.field])..",")
     end
     for _, def in ipairs(SINGING_TRACK_DEFS) do
-        table.insert(lines, "    "..def.field.." = "..tostring(gs_skillup[def.field])..",")
+        table.insert(lines, "    "..def.field.." = "..tostring(addon_state[def.field])..",")
     end
-    table.insert(lines, "    use_toolbags = "..tostring(gs_skillup.use_toolbags)..",")
-    table.insert(lines, "    periodic_ui_refresh = "..tostring(gs_skillup.periodic_ui_refresh)..",")
+    table.insert(lines, "    use_toolbags = "..tostring(addon_state.use_toolbags)..",")
+    table.insert(lines, "    periodic_ui_refresh = "..tostring(addon_state.periodic_ui_refresh)..",")
     table.insert(lines, "}")
 
     local dir = windower.addon_path..'data/'..tostring(windower.ffxi.get_player() and windower.ffxi.get_player().name)
@@ -1944,6 +2560,16 @@ function save_settings_file()
     return true
 end
 
+-- Function: handle_settings_click
+-- Description: The full click dispatcher for the settings panel.
+--   Checks, in order: the hide button, main tabs, sub-tabs, Singing/
+--   Ninjutsu inline option checkboxes, grid column entries (category
+--   checkboxes and toggle buttons on Main/Globals/Help, spell
+--   checkboxes on every other tab), and finally Save/Cancel.
+-- Parameters:
+--   x (number) - the click's screen X coordinate
+--   y (number) - the click's screen Y coordinate
+-- Returns: none
 function handle_settings_click(x, y)
     if settings_state.hidden then return end
     if settings_ui.hide_button and settings_ui.hide_button:hover(x, y) then
@@ -1992,7 +2618,10 @@ function handle_settings_click(x, y)
                 local entry = entries[row]
                 if entry then
                     if settings_state.active_main == "Globals" or settings_state.active_main == "Main" or settings_state.active_main == "Help" then
-                        if entry.command then
+                        if entry.category then
+                            addon_state.queue_selected[entry.category] = not addon_state.queue_selected[entry.category] or nil
+                            rebuild_settings_grid()
+                        elseif entry.command then
                             self_command(entry.command)
                             updatedisplay()
                             rebuild_settings_grid()
@@ -2009,6 +2638,7 @@ function handle_settings_click(x, y)
     end
     if settings_ui.save_button:hover(x, y) then
         save_settings_file()
+        settings_state.unsaved_changes = false
         show_footer_notice('Saved!', 46, 204, 113)
         return
     end
@@ -2017,6 +2647,7 @@ function handle_settings_click(x, y)
         -- whatever's currently persisted, and refresh the visible tab.
         init_settings_selection()
         rebuild_settings_grid()
+        settings_state.unsaved_changes = false
         show_footer_notice('Canceled', 231, 76, 60)
         return
     end
@@ -2027,6 +2658,12 @@ end
 -- unit even though each piece is a separate Windower primitive.
 -- Hides the whole panel (not destroyed -- just hidden, so showing it
 -- again doesn't need a full rebuild). //skillup hide, or the [X] button.
+-- Function: hide_settings_panel
+-- Description: Hides every settings UI object without destroying any of
+--   them, so showing the panel again is instant with no rebuild needed.
+--   Triggered by the [X] button or //skillup hide.
+-- Parameters: none
+-- Returns: none
 function hide_settings_panel()
     local function hide(obj) if obj then obj:hide() end end
     hide(settings_ui.border)
@@ -2055,10 +2692,14 @@ function hide_settings_panel()
     settings_state.hidden = true
 end
 
--- Shows the panel again. Re-shows the persistent pieces directly, then
--- lets rebuild_settings_sub_tabs() re-derive which tab-specific elements
--- (sub-tabs, columns, output window) should be visible for whichever tab
--- is currently active, rather than tracking that separately.
+-- Function: show_settings_panel
+-- Description: Shows the panel again after being hidden. Re-shows the
+--   persistent pieces directly, then lets rebuild_settings_sub_tabs()
+--   re-derive which tab-specific elements (sub-tabs, columns, output
+--   window) should be visible for whichever tab is currently active,
+--   rather than tracking that separately. Triggered by //skillup show.
+-- Parameters: none
+-- Returns: none
 function show_settings_panel()
     local function show(obj) if obj then obj:show() end end
     show(settings_ui.border)
@@ -2077,9 +2718,16 @@ function show_settings_panel()
     rebuild_settings_sub_tabs()
 end
 
--- Captures each element's offset from the current origin, once per drag
--- session, so every subsequent frame of that same drag can reposition
--- everything with a single setter call (no getter) per element.
+-- Function: build_drag_offsets_cache
+-- Description: Captures every settings UI element's offset from the
+--   current origin, once at the start of a drag session, so every
+--   subsequent frame of that same drag can reposition everything with a
+--   single setter call (no getter) per element instead of a getter+
+--   setter round trip -- this was the fix for text objects visibly
+--   lagging behind the backdrop during a drag.
+-- Parameters: none
+-- Returns: table - a cache of {key = {obj, dx, dy}} entries for every
+--   trackable element, ready to pass to apply_drag_offsets_cache()
 function build_drag_offsets_cache()
     local cache = {}
     local function record(key, obj)
@@ -2114,13 +2762,19 @@ function build_drag_offsets_cache()
     return cache
 end
 
--- Repositions every cached element via a single setter call each (no
--- getters), and shifts the stored ABSOLUTE coordinates (content_right,
--- tabs_y, etc. -- bookkeeping numbers, not positioned objects) by the
--- same delta. Skipping that second part would leave them stale, so any
--- rebuild triggered mid-drag (e.g. hovering a tab) would recompute sizes
--- against the new origin combined with old values, visibly separating
--- the title/tabs from the rest of the panel.
+-- Function: apply_drag_offsets_cache
+-- Description: Repositions every cached element via a single setter
+--   call each (no getters), and shifts the stored ABSOLUTE coordinates
+--   (content_right, tabs_y, etc. -- bookkeeping numbers, not positioned
+--   objects) by the same delta. Skipping that second part would leave
+--   them stale, so any rebuild triggered mid-drag (e.g. hovering a tab)
+--   would recompute sizes against the new origin combined with old
+--   values, visibly separating the title/tabs from the rest of the panel.
+-- Parameters:
+--   cache (table) - the cache built by build_drag_offsets_cache()
+--   dx (number) - how far the origin moved on the X axis this frame
+--   dy (number) - how far the origin moved on the Y axis this frame
+-- Returns: none
 function apply_drag_offsets_cache(cache, dx, dy)
     for _, entry in pairs(cache) do
         entry.obj:pos(settings_origin_x + entry.dx, settings_origin_y + entry.dy)
@@ -2132,9 +2786,17 @@ function apply_drag_offsets_cache(cache, dx, dy)
     if settings_ui.footer_bottom_y then settings_ui.footer_bottom_y = settings_ui.footer_bottom_y + dy end
 end
 
--- Only rebuilds the visible tab when the hovered target actually changes
--- (not on every mouse-move pixel), since a rebuild recreates texts
--- objects rather than cheaply updating an existing one.
+-- Function: handle_settings_hover
+-- Description: Handles mouse-move events over the settings panel,
+--   determining which (if any) clickable row is currently hovered and
+--   updating the hover-highlight color. Only rebuilds the visible tab
+--   when the hovered target actually changes (not on every mouse-move
+--   pixel), since a rebuild recreates texts objects rather than cheaply
+--   updating an existing one.
+-- Parameters:
+--   x (number) - the cursor's current screen X coordinate
+--   y (number) - the cursor's current screen Y coordinate
+-- Returns: none
 last_hovered_settings_id = nil
 function handle_settings_hover(x, y)
     if settings_state.hidden then return end
@@ -2171,6 +2833,15 @@ windower.register_event('mouse', function(type, x, y, delta, blocked)
         handle_settings_click(x, y)
     end
 end)
+
+-- Function: log_debug_line
+-- Description: Appends a single timestamped line to this character's
+--   Saves/skillup_debug.log, creating the Saves directory first if it
+--   doesn't exist yet. Used by every debug command (mpwsdebug,
+--   partydebug, skilldebug, actionmsgdebug, actioncapture).
+-- Parameters:
+--   line (string) - the line of text to log
+-- Returns: none
 function log_debug_line(line)
     local ok, dir = pcall(function() return windower.addon_path..'data/'..windower.ffxi.get_player().name..'/Saves' end)
     if not ok then
@@ -2193,7 +2864,7 @@ function log_debug_line(line)
     end
 end
 windower.register_event('incoming text', function(original, modified, original_mode, modified_mode, block)
-    if gs_skillup.debug_action_msg and modified and modified:lower():find('skill') then
+    if addon_state.debug_action_msg and modified and modified:lower():find('skill') then
         log_debug_line('incoming text: '..modified)
     end
     if modified then
@@ -2204,23 +2875,23 @@ windower.register_event('incoming text', function(original, modified, original_m
         local clean = modified:gsub('\30.', '')
         -- e.g. "Player's blue magic skill rises 0.3 points."
         local amount = clean:match(windower.ffxi.get_player().name.."'s .- skill rises ([%d%.]+) points")
-        if gs_skillup.debug_action_msg and clean:lower():find('rises') then
-            log_debug_line('match attempt: windower.ffxi.get_player().name="'..tostring(windower.ffxi.get_player().name)..'" clean="'..clean..'" amount='..tostring(amount)..' total_before='..tostring(gs_skillup.total_skill_ups))
+        if addon_state.debug_action_msg and clean:lower():find('rises') then
+            log_debug_line('match attempt: windower.ffxi.get_player().name="'..tostring(windower.ffxi.get_player().name)..'" clean="'..clean..'" amount='..tostring(amount)..' total_before='..tostring(addon_state.total_skill_ups))
         end
         if amount then
             local points = tonumber(amount)
             local ts = os.clock()
-            gs_skillup.total_skill_ups = gs_skillup.total_skill_ups + points
-            gs_skillup.skill_ups[ts] = points
-            if gs_skillup.debug_action_msg then
-                log_debug_line('counted: points='..tostring(points)..' total_after='..tostring(gs_skillup.total_skill_ups))
+            addon_state.total_skill_ups = addon_state.total_skill_ups + points
+            addon_state.skill_ups[ts] = points
+            if addon_state.debug_action_msg then
+                log_debug_line('counted: points='..tostring(points)..' total_after='..tostring(addon_state.total_skill_ups))
             end
             updatedisplay()
         end
     end
 end)
 windower.register_event('action message', function(actor_id, target_id, actor_index, target_index, message_id, param_1, param_2, param_3)
-    if gs_skillup.debug_action_msg then
+    if addon_state.debug_action_msg then
         log_debug_line('action message: actor='..tostring(actor_id)..' target='..tostring(target_id)..' windower.ffxi.get_player().id='..tostring(windower.ffxi.get_player().id)..' id='..tostring(message_id)..' p1='..tostring(param_1)..' p2='..tostring(param_2)..' p3='..tostring(param_3))
     end
     updatedisplay()
@@ -2235,7 +2906,7 @@ windower.register_event('prerender',function()
     if frame_count%30 == 0 then
         updatedisplay()
     end
-    if gs_skillup.periodic_ui_refresh and not settings_state.hidden and not drag_offsets_cache then
+    if addon_state.periodic_ui_refresh and not settings_state.hidden and not drag_offsets_cache then
         if not last_ui_refresh_time then
             last_ui_refresh_time = os.clock()
         elseif os.clock() - last_ui_refresh_time >= UI_REFRESH_INTERVAL then
@@ -2245,8 +2916,8 @@ windower.register_event('prerender',function()
         end
     end
     if settings_ui.footer_notice_expire and os.clock() >= settings_ui.footer_notice_expire then
-        settings_ui.footer_notice:hide()
         settings_ui.footer_notice_expire = nil
+        refresh_unsaved_indicator()
     end
     
     -- The backdrop is the drag handle for the whole panel (click anywhere
@@ -2280,8 +2951,8 @@ windower.register_event('prerender',function()
         last_drag_pos_x, last_drag_pos_y = bx, by
     end
     if get_player_status_string() == 'Resting' then
-        if skilluprun and windower.ffxi.get_player().vitals.mp >= windower.ffxi.get_player().vitals.max_mp and not gs_skillup.resting_recovery_sent then
-            gs_skillup.resting_recovery_sent = true
+        if skilluprun and windower.ffxi.get_player().vitals.mp >= windower.ffxi.get_player().vitals.max_mp and not addon_state.resting_recovery_sent then
+            addon_state.resting_recovery_sent = true
             windower.send_command('input /heal off')
             -- Resting never resumed casting on its own -- nothing else
             -- calls back into the decision pipeline once /heal off fires,
@@ -2289,14 +2960,18 @@ windower.register_event('prerender',function()
             decide_and_act(2.0)
         end
     else
-        gs_skillup.resting_recovery_sent = false
+        addon_state.resting_recovery_sent = false
     end
-    -- Safety net: ja/ws/item resolution categories aren't confirmed yet
-    -- (only spells are, via the 'action' event above), so those pending
-    -- casts would otherwise never clear and the rotation would stall.
-    -- Treat a still-active non-spell pending cast as resolved after a
+    -- Safety net: not every rejected cast generates a confirmable
+    -- 'action' event. ja/ws/item resolution categories were never
+    -- confirmed via actioncapture in the first place, but even spells
+    -- can fail silently -- a client-side rejection like "Unable to cast
+    -- spells at this time" happens before anything reaches the server,
+    -- so no action event fires at all, and pending_cast would otherwise
+    -- stay stuck forever with nothing left to call decide_and_act()
+    -- again. Treat any still-active pending cast as resolved after a
     -- generous timeout rather than hang indefinitely.
-    if pending_cast.active and pending_cast.cast_type ~= 'spell' and pending_cast.sent_time
+    if pending_cast.active and pending_cast.sent_time
         and os.clock() - pending_cast.sent_time > 8 then
         handle_cast_success()
     end
