@@ -38,7 +38,7 @@ SUB_CATEGORY_RULES = {
         {name="Protect/Shell", match=function(s) return s.en:find('^Protect') or s.en:find('^Shell') end},
         {name="Bar-spells",    match=function(s) return s.en:find('^Bar') end},
         {name="En-spells",     match=function(s) return s.en:find('^Enfire') or s.en:find('^Enblizzard') or s.en:find('^Enaero') or s.en:find('^Enstone') or s.en:find('^Enthunder') or s.en:find('^Enwater') end},
-        {name="Buffs",         match=function(s) return s.en:find('^Regen') or s.en:find('^Refresh') or s.en:find('^Haste') or s.en:find('^Flurry') or s.en:find('^Phalanx') or s.en:find('^Stoneskin') or s.en:find('^Aquaveil') or s.en:find('^Blink') or s.en:find('^Boost%-') or s.en:find('^Gain%-') or s.en:find('^Temper') end},
+        {name="Buffs",         match=function(s) return s.en:find('^Regen') or s.en:find('^Refresh') or s.en:find('^Haste') or s.en:find('^Flurry') or s.en:find('^Phalanx') or s.en:find('^Stoneskin') or s.en:find('^Aquaveil') or s.en:find('^Blink') or s.en:find('^Boost%-') or s.en:find('^Gain%-') end},
     },
   
     Enfeebling = {},
@@ -88,6 +88,11 @@ SUB_CATEGORY_RULES = {
 local function is_excluded(name)
     return name:wmatch('Teleport-*|Warp*|Tractor*|Retrace|Escape|Geo-*|Sacrifice|Odin|Alexander|Recall-*')
 end
+
+-- Trust/party member names listed here are treated as excluded targets
+-- by in_trust_exclusion_list() in skillup.lua. Add exact in-game
+-- Trust/party member names as needed.
+TRUST_EXCLUSION_LIST = T{"Brygid", "Kupofried", "Kuyin Hathdenna", "Moogle", "Sakura", "Star Sibyl"}
 
 -- Returns { [category] = { [sub_category] = { {id=, name=}, ... }, ... }, ... }
 -- Categories with no SUB_CATEGORY_RULES entry get everything under a

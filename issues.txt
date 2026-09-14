@@ -1,0 +1,9 @@
+Issue list
+
+1) During combat, when the player is the taraget of the enemeny, skillup spells are only being cast sporadically.
+2) frequent "cannot use weaponskill at this time" errors
+3) changing weapons from dagger to club while skillup is running causes skillup to no long use mp recovery weaponskills
+4) codebase still has references to gs_ which need to be removed.
+5) Attempting to cast moogle during combat, player staus engaged with enmity, will cause skillup to continually attempt to cast moogle even though you cannot call trusts when you hve enmity.
+6) Ensure that having either main job of red mage or white mage or sub job of red mage or white and access to refresh or haste uses those spells.
+7) 
